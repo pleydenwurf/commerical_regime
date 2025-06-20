@@ -1,0 +1,167 @@
+# inventory/hosts.yml
+all:
+  children:
+    opengrok_servers:
+      hosts:
+        opengrok-01:
+          ansible_host: 192.168.1.100
+          ansible_user: ansible
+          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+
+---
+# group_vars/opengrok_servers/main.yml
+# OpenGrok Configuration Variables
+
+# Versions
+opengrok_version: "1.13.6"
+ctags_version: "6.0.0"
+tomcat_version: "10.1.15"
+
+# Users and Groups
+opengrok_user: "opengrok"
+opengrok_group: "opengrok"
+
+# Directories
+opengrok_home: "/opt/opengrok"
+opengrok_data: "/var/opengrok"
+opengrok_src: "/var/opengrok/src"
+opengrok_etc: "/var/opengrok/etc"
+opengrok_log: "/var/log/opengrok"
+tomcat_home: "/opt/tomcat"
+
+# Java Configuration
+java_home: "/usr/lib/jvm/java-11-openjdk"
+
+# Optional: Create sample repository
+create_sample_repo: false
+
+# Memory settings for Java processes
+java_xms: "512M"
+java_xmx: "2048M"
+
+# Indexing schedule (systemd timer format)
+indexer_schedule: "6h"  # Every 6 hours
+
+# Network settings
+opengrok_port: 8080
+tomcat_shutdown_port: 8005
+
+# Additional Python packages (optional)
+additional_python_packages:
+  - GitPython
+  - paramiko
+  - schedule
+  - click
+
+---
+# host_vars/opengrok-01/main.yml
+# Host-specific variables for opengrok-01
+
+# Specific repositories to clone (optional)
+repositories_to_clone:
+  - name: "sample-project"
+    url: "https://github.com/your-org/sample-project.git"
+    branch: "main"
+  - name: "documentation"
+    url: "https://github.com/your-org/documentation.git"
+    branch: "master"
+
+# Host-specific resource allocation
+java_xms: "1024M"
+java_xmx: "4096M"
+
+# Custom indexing exclusions
+indexer_excludes:
+  - "*.log"
+  - "*.tmp"
+  - "node_modules/*"
+  - ".git/*"
+  - "target/*"
+  - "build/*"
+
+---
+# Additional tasks for repository management
+# Add these tasks to the main playbook if you want automatic repository cloning
+
+- name: Clone additional repositories
+  git:
+    repo: "{{ item.url }}"
+    dest: "{{ opengrok_src }}/{{ item.name }}"
+    version: "{{ item.branch | default('main') }}"
+    depth: 1
+  loop: "{{ repositories_to_clone | default([]) }}"
+  become_user: "{{ opengrok_user }}"
+  when: repositories_to_clone is defined
+
+- name: Install additional Python packages
+  pip:
+    name: "{{ additional_python_packages }}"
+    executable: pip3
+    state: present
+  when: additional_python_packages is defined
+
+- name: Create repository sync cron job
+  cron:
+    name: "OpenGrok repository sync"
+    minute: "0"
+    hour: "*/3"
+    job: "{{ opengrok_home }}/bin/opengrok-sync.py --full"
+    user: "{{ opengrok_user }}"
+  when: setup_cron_sync | default(false)
+
+---
+# Example usage commands:
+
+# 1. Run the playbook:
+# ansible-playbook -i inventory/hosts.yml opengrok-install.yml
+
+# 2. Run with specific tags:
+# ansible-playbook -i inventory/hosts.yml opengrok-install.yml --tags "install,configure"
+
+# 3. Run with extra variables:
+# ansible-playbook -i inventory/hosts.yml opengrok-install.yml -e "create_sample_repo=true"
+
+# 4. Check the installation:
+# ansible opengrok_servers -i inventory/hosts.yml -m shell -a "systemctl status tomcat-opengrok"
+
+---
+# Verification tasks (add to main playbook)
+- name: Verify OpenGrok installation
+  block:
+    - name: Check if OpenGrok is running
+      uri:
+        url: "http://localhost:8080/source"
+        method: GET
+        status_code: 200
+        timeout: 30
+      register: opengrok_check
+      retries: 5
+      delay: 10
+
+    - name: Check OpenGrok API
+      uri:
+        url: "http://localhost:8080/source/api/v1/system/status"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: api_check
+
+    - name: Verify ctags installation
+      command: ctags --version
+      register: ctags_check
+      changed_when: false
+
+    - name: Check Python tools
+      command: python3 -c "import requests, yaml, flask; print('Python tools OK')"
+      register: python_check
+      changed_when: false
+
+    - name: Display verification results
+      debug:
+        msg:
+          - "OpenGrok web interface: {{ 'OK' if opengrok_check.status == 200 else 'FAILED' }}"
+          - "OpenGrok API: {{ 'OK' if api_check.status == 200 else 'FAILED' }}"
+          - "Ctags: {{ 'OK' if ctags_check.rc == 0 else 'FAILED' }}"
+          - "Python tools: {{ 'OK' if python_check.rc == 0 else 'FAILED' }}"
+
+  tags: verify

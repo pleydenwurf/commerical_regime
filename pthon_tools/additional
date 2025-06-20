@@ -1,0 +1,214 @@
+# inventory/hosts.yml
+all:
+  children:
+    opengrok_servers:
+      hosts:
+        opengrok-python:
+          ansible_host: 192.168.1.100
+          ansible_user: ansible
+          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+
+---
+# group_vars/opengrok_servers/main.yml
+opengrok_user: "opengrok"
+opengrok_group: "opengrok" 
+opengrok_home: "/opt/opengrok"
+venv_path: "/opt/opengrok/venv"
+python_version: "python3.11"
+opengrok_python_version: "1.13.6"
+
+# Enable the mirroring timer
+enable_mirror_timer: true
+
+# Additional configuration
+repositories_to_mirror:
+  - name: "sample-project"
+    url: "https://github.com/oracle/opengrok.git"
+    type: "git"
+  - name: "documentation"
+    url: "https://github.com/your-org/docs.git"
+    type: "git"
+
+---
+# Usage Examples and Commands
+
+# 1. Run the playbook
+# ansible-playbook -i inventory/hosts.yml opengrok-python-venv.yml
+
+# 2. Run with specific variables
+# ansible-playbook -i inventory/hosts.yml opengrok-python-venv.yml -e "enable_mirror_timer=yes"
+
+# 3. Run only verification tasks
+# ansible-playbook -i inventory/hosts.yml opengrok-python-venv.yml --tags verify
+
+# 4. Check installation remotely
+# ansible opengrok_servers -i inventory/hosts.yml -m shell -a "source /opt/opengrok/venv/bin/activate && python -c 'import opengrok_tools; print(opengrok_tools.__version__)'" -u ansible
+
+---
+# Post-installation tasks (manual)
+
+# On the target server, as the opengrok user:
+
+# 1. Activate the virtual environment
+# source /opt/opengrok/venv/bin/activate
+
+# 2. Test the tools
+# opengrok-mirror --help
+# opengrok-sync --help
+# opengrok-deploy --help
+
+# 3. Configure repositories in the config file
+# vi /opt/opengrok/etc/opengrok-python.conf
+
+# 4. Run initial mirror (if using repository mirroring)
+# /opt/opengrok/bin/opengrok-mirror.sh --batch
+
+# 5. Check systemd services (if enabled)
+# sudo systemctl status opengrok-mirror.timer
+# sudo systemctl start opengrok-mirror.service
+
+---
+# Advanced configuration example
+
+# Create a more detailed configuration file
+# templates/opengrok-python-advanced.conf.j2
+
+[DEFAULT]
+opengrok_jar = {{ opengrok_home }}/current/lib/opengrok.jar
+opengrok_base = {{ opengrok_home }}
+data_root = /var/opengrok
+source_root = /var/opengrok/src
+log_level = INFO
+
+[repositories]
+# Repository-specific settings
+{% for repo in repositories_to_mirror | default([]) %}
+[repository.{{ repo.name }}]
+url = {{ repo.url }}
+type = {{ repo.type }}
+branch = {{ repo.branch | default('main') }}
+{% endfor %}
+
+[indexer]
+# Indexer-specific settings
+memory = 2048m
+threads = 4
+generate_html = true
+history_cache = true
+
+[mirror]
+# Advanced mirroring settings
+parallel_workers = 4
+timeout = 300
+retry_count = 3
+cleanup_enabled = true
+cleanup_days = 30
+
+[logging]
+level = INFO
+file = /var/log/opengrok-python/opengrok-tools.log
+format = %(asctime)s - %(name)s - %(levelname)s - %(message)s
+max_size = 100MB
+backup_count = 5
+
+---
+# Testing and validation script
+# Create this as a separate playbook or include it in the main one
+
+- name: Test OpenGrok Python tools functionality
+  hosts: opengrok_servers
+  become: yes
+  become_user: "{{ opengrok_user }}"
+  tasks:
+    - name: Test virtual environment activation
+      shell: |
+        source {{ venv_path }}/bin/activate
+        python --version
+        pip --version
+      register: venv_test
+      changed_when: false
+
+    - name: Test OpenGrok tools import
+      shell: |
+        source {{ venv_path }}/bin/activate
+        python -c "
+        import opengrok_tools
+        print(f'OpenGrok Tools Version: {opengrok_tools.__version__}')
+        
+        # Test importing specific modules
+        from opengrok_tools.utils import commands
+        from opengrok_tools.utils import log
+        print('All imports successful')
+        "
+      register: import_test
+      changed_when: false
+
+    - name: Test tool executables
+      shell: |
+        source {{ venv_path }}/bin/activate
+        {{ item }} --version || {{ item }} --help | head -5
+      register: tool_test
+      changed_when: false
+      loop:
+        - opengrok-deploy
+        - opengrok-mirror
+        - opengrok-sync
+      ignore_errors: yes
+
+    - name: Display test results
+      debug:
+        msg:
+          - "Virtual Environment Test: {{ venv_test.stdout_lines }}"
+          - "Import Test: {{ import_test.stdout_lines }}"
+          - "Tool Tests: {{ tool_test.results | map(attribute='stdout_lines') | list }}"
+
+---
+# Troubleshooting guide
+
+# Common issues and solutions:
+
+# 1. Permission errors
+# sudo chown -R opengrok:opengrok /opt/opengrok
+# sudo chown -R opengrok:opengrok /var/opengrok
+# sudo chown -R opengrok:opengrok /var/log/opengrok-python
+
+# 2. Virtual environment issues
+# rm -rf /opt/opengrok/venv
+# python3.11 -m venv /opt/opengrok/venv
+# source /opt/opengrok/venv/bin/activate
+# pip install opengrok-tools
+
+# 3. SELinux issues (if enabled)
+# sudo setsebool -P httpd_can_network_connect 1
+# sudo semanage fcontext -a -t httpd_var_lib_t "/var/opengrok(/.*)?"
+# sudo restorecon -R /var/opengrok
+
+# 4. Firewall issues
+# sudo firewall-cmd --permanent --add-port=8080/tcp
+# sudo firewall-cmd --reload
+
+# 5. Check logs
+# tail -f /var/log/opengrok-python/*.log
+# journalctl -u opengrok-mirror.service -f
+
+---
+# Integration with existing OpenGrok installation
+
+# If you already have OpenGrok installed, you can integrate the Python tools:
+
+additional_integration_tasks:
+  - name: Link to existing OpenGrok installation
+    file:
+      src: /path/to/existing/opengrok
+      dest: "{{ opengrok_home }}/current"
+      state: link
+      owner: "{{ opengrok_user }}"
+      group: "{{ opengrok_group }}"
+  
+  - name: Update configuration to use existing paths
+    template:
+      src: opengrok-python-existing.conf.j2
+      dest: "{{ opengrok_home }}/etc/opengrok-python.conf"
+      owner: "{{ opengrok_user }}"
+      group: "{{ opengrok_group }}"
+      mode: '0644'

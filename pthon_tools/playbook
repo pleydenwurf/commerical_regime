@@ -1,0 +1,308 @@
+---
+- name: Install OpenGrok Python package in virtual environment
+  hosts: opengrok_servers
+  become: yes
+  vars:
+    opengrok_user: "opengrok"
+    opengrok_group: "opengrok"
+    opengrok_home: "/opt/opengrok"
+    venv_path: "/opt/opengrok/venv"
+    python_version: "python3.11"
+    opengrok_python_version: "1.13.6"
+    
+  tasks:
+    # Install system dependencies for Python virtual environment
+    - name: Install Python and virtual environment dependencies
+      dnf:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - python3-devel
+          - python3-setuptools
+          - python3-wheel
+          - gcc
+          - gcc-c++
+          - make
+          - git
+        state: present
+
+    # Ensure OpenGrok user exists
+    - name: Create opengrok group
+      group:
+        name: "{{ opengrok_group }}"
+        state: present
+
+    - name: Create opengrok user
+      user:
+        name: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        home: "{{ opengrok_home }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+        state: present
+
+    # Create OpenGrok home directory
+    - name: Create OpenGrok home directory
+      file:
+        path: "{{ opengrok_home }}"
+        state: directory
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    # Create Python virtual environment
+    - name: Create Python virtual environment
+      command: "{{ python_version }} -m venv {{ venv_path }}"
+      args:
+        creates: "{{ venv_path }}/bin/activate"
+      become_user: "{{ opengrok_user }}"
+
+    - name: Set virtual environment ownership
+      file:
+        path: "{{ venv_path }}"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        recurse: yes
+        state: directory
+
+    # Upgrade pip in virtual environment
+    - name: Upgrade pip in virtual environment
+      pip:
+        name: pip
+        state: latest
+        virtualenv: "{{ venv_path }}"
+        virtualenv_command: "{{ python_version }} -m venv"
+      become_user: "{{ opengrok_user }}"
+
+    # Install wheel and setuptools
+    - name: Install build dependencies in virtual environment
+      pip:
+        name:
+          - wheel
+          - setuptools
+          - build
+        state: latest
+        virtualenv: "{{ venv_path }}"
+      become_user: "{{ opengrok_user }}"
+
+    # Install OpenGrok Python package
+    - name: Install OpenGrok Python package
+      pip:
+        name: "opengrok-tools=={{ opengrok_python_version }}"
+        virtualenv: "{{ venv_path }}"
+        state: present
+      become_user: "{{ opengrok_user }}"
+      register: opengrok_install
+
+    # Install additional Python dependencies for OpenGrok tools
+    - name: Install additional Python dependencies
+      pip:
+        name:
+          - requests
+          - pyyaml
+          - coloredlogs
+          - filelock
+          - flask
+          - waitress
+          - gitpython
+          - paramiko
+          - click
+          - jinja2
+          - markupsafe
+        virtualenv: "{{ venv_path }}"
+        state: present
+      become_user: "{{ opengrok_user }}"
+
+    # Create symbolic links for easy access
+    - name: Create bin directory for scripts
+      file:
+        path: "{{ opengrok_home }}/bin"
+        state: directory
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    - name: Create symbolic links for OpenGrok Python tools
+      file:
+        src: "{{ venv_path }}/bin/{{ item }}"
+        dest: "{{ opengrok_home }}/bin/{{ item }}"
+        state: link
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        force: yes
+      loop:
+        - opengrok-deploy
+        - opengrok-indexer
+        - opengrok-java
+        - opengrok-mirror
+        - opengrok-projadm
+        - opengrok-reindex-project
+        - opengrok-sync
+      ignore_errors: yes  # Some tools might not be available in all versions
+
+    # Create activation script
+    - name: Create virtual environment activation script
+      template:
+        src: activate-opengrok.sh.j2
+        dest: "{{ opengrok_home }}/bin/activate-opengrok.sh"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    # Create OpenGrok Python configuration
+    - name: Create OpenGrok Python tools configuration directory
+      file:
+        path: "{{ opengrok_home }}/etc"
+        state: directory
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    - name: Create OpenGrok Python tools configuration
+      template:
+        src: opengrok-python.conf.j2
+        dest: "{{ opengrok_home }}/etc/opengrok-python.conf"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0644'
+
+    # Create wrapper scripts for common operations
+    - name: Create OpenGrok mirror wrapper script
+      template:
+        src: opengrok-mirror.sh.j2
+        dest: "{{ opengrok_home }}/bin/opengrok-mirror.sh"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    - name: Create OpenGrok sync wrapper script
+      template:
+        src: opengrok-sync.sh.j2
+        dest: "{{ opengrok_home }}/bin/opengrok-sync.sh"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    - name: Create OpenGrok deploy wrapper script
+      template:
+        src: opengrok-deploy.sh.j2
+        dest: "{{ opengrok_home }}/bin/opengrok-deploy.sh"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    # Set up logging directory
+    - name: Create OpenGrok Python tools log directory
+      file:
+        path: "/var/log/opengrok-python"
+        state: directory
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    # Create systemd service for OpenGrok Python tools
+    - name: Create OpenGrok mirror systemd service
+      template:
+        src: opengrok-mirror.service.j2
+        dest: /etc/systemd/system/opengrok-mirror.service
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create OpenGrok mirror timer
+      template:
+        src: opengrok-mirror.timer.j2
+        dest: /etc/systemd/system/opengrok-mirror.timer
+        mode: '0644'
+      notify: reload systemd
+
+    # Create logrotate configuration
+    - name: Create logrotate configuration for OpenGrok Python tools
+      template:
+        src: opengrok-python-logrotate.j2
+        dest: /etc/logrotate.d/opengrok-python
+        mode: '0644'
+
+    # Enable and start systemd timer
+    - name: Enable OpenGrok mirror timer
+      systemd:
+        name: opengrok-mirror.timer
+        enabled: yes
+        daemon_reload: yes
+      when: enable_mirror_timer | default(false)
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+  post_tasks:
+    # Verification tasks
+    - name: Verify OpenGrok Python installation
+      block:
+        - name: Check virtual environment
+          stat:
+            path: "{{ venv_path }}/bin/python"
+          register: venv_check
+
+        - name: Test OpenGrok Python tools import
+          shell: |
+            source {{ venv_path }}/bin/activate
+            python -c "import opengrok_tools; print('OpenGrok Python tools version:', opengrok_tools.__version__)"
+          args:
+            executable: /bin/bash
+          register: import_check
+          become_user: "{{ opengrok_user }}"
+          changed_when: false
+
+        - name: List installed OpenGrok Python tools
+          shell: |
+            source {{ venv_path }}/bin/activate
+            pip list | grep -i opengrok
+          args:
+            executable: /bin/bash
+          register: installed_packages
+          become_user: "{{ opengrok_user }}"
+          changed_when: false
+
+        - name: Check OpenGrok Python tool executables
+          stat:
+            path: "{{ venv_path }}/bin/{{ item }}"
+          register: tool_check
+          loop:
+            - opengrok-deploy
+            - opengrok-indexer
+            - opengrok-mirror
+            - opengrok-sync
+          ignore_errors: yes
+
+        - name: Display installation results
+          debug:
+            msg:
+              - "Virtual environment: {{ 'OK' if venv_check.stat.exists else 'FAILED' }}"
+              - "Python import test: {{ 'OK' if import_check.rc == 0 else 'FAILED' }}"
+              - "Import output: {{ import_check.stdout if import_check.rc == 0 else import_check.stderr }}"
+              - "Installed packages: {{ installed_packages.stdout_lines }}"
+              - "Available tools: {{ tool_check.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+              - ""
+              - "Usage:"
+              - "  Activate environment: source {{ venv_path }}/bin/activate"
+              - "  Or use wrapper: source {{ opengrok_home }}/bin/activate-opengrok.sh"
+              - "  Run tools directly: {{ opengrok_home }}/bin/opengrok-*"
+
+      tags: verify
+
+    - name: Create usage documentation
+      template:
+        src: README-python-tools.md.j2
+        dest: "{{ opengrok_home }}/README-python-tools.md"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0644'
+
+  vars_prompt:
+    - name: enable_mirror_timer
+      prompt: "Enable automatic repository mirroring timer? (yes/no)"
+      default: "no"
+      private: no

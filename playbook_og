@@ -1,0 +1,340 @@
+---
+- name: Install OpenGrok with Python tools
+  hosts: opengrok_servers
+  become: yes
+  vars:
+    opengrok_version: "1.13.6"
+    opengrok_user: "opengrok"
+    opengrok_group: "opengrok"
+    opengrok_home: "/opt/opengrok"
+    opengrok_data: "/var/opengrok"
+    opengrok_src: "/var/opengrok/src"
+    opengrok_etc: "/var/opengrok/etc"
+    opengrok_log: "/var/log/opengrok"
+    tomcat_home: "/opt/tomcat"
+    tomcat_user: "tomcat"
+    java_home: "/usr/lib/jvm/java-11-openjdk"
+    ctags_version: "6.0.0"
+    
+  tasks:
+    # Java and basic dependencies
+    - name: Install Java 11 and basic packages
+      dnf:
+        name:
+          - java-11-openjdk
+          - java-11-openjdk-devel
+          - wget
+          - unzip
+          - git
+          - python3
+          - python3-pip
+          - python3-devel
+          - gcc
+          - gcc-c++
+          - make
+          - autotools-common
+          - autoconf
+          - automake
+          - pkg-config
+          - jansson-devel
+          - libxml2-devel
+          - libyaml-devel
+        state: present
+
+    # Python tools for OpenGrok
+    - name: Install Python packages for OpenGrok
+      pip:
+        name:
+          - requests
+          - filelock
+          - flask
+          - waitress
+          - pyyaml
+          - coloredlogs
+        executable: pip3
+        state: present
+
+    # Create OpenGrok user and group
+    - name: Create opengrok group
+      group:
+        name: "{{ opengrok_group }}"
+        state: present
+
+    - name: Create opengrok user
+      user:
+        name: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        home: "{{ opengrok_home }}"
+        shell: /bin/bash
+        system: yes
+        create_home: no
+        state: present
+
+    # Create directory structure
+    - name: Create OpenGrok directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+      loop:
+        - "{{ opengrok_home }}"
+        - "{{ opengrok_data }}"
+        - "{{ opengrok_src }}"
+        - "{{ opengrok_etc }}"
+        - "{{ opengrok_log }}"
+        - "{{ opengrok_data }}/index"
+
+    # Install Universal Ctags (required for OpenGrok)
+    - name: Download Universal Ctags source
+      get_url:
+        url: "https://github.com/universal-ctags/ctags/archive/refs/tags/v{{ ctags_version }}.tar.gz"
+        dest: "/tmp/ctags-{{ ctags_version }}.tar.gz"
+        mode: '0644'
+
+    - name: Extract Universal Ctags
+      unarchive:
+        src: "/tmp/ctags-{{ ctags_version }}.tar.gz"
+        dest: "/tmp"
+        remote_src: yes
+        creates: "/tmp/ctags-{{ ctags_version }}"
+
+    - name: Build and install Universal Ctags
+      shell: |
+        cd /tmp/ctags-{{ ctags_version }}
+        ./autogen.sh
+        ./configure --prefix=/usr/local
+        make -j$(nproc)
+        make install
+      args:
+        creates: /usr/local/bin/ctags
+
+    - name: Update ctags alternatives
+      alternatives:
+        name: ctags
+        path: /usr/local/bin/ctags
+        link: /usr/bin/ctags
+        priority: 100
+
+    # Download and install OpenGrok
+    - name: Download OpenGrok
+      get_url:
+        url: "https://github.com/oracle/opengrok/releases/download/{{ opengrok_version }}/opengrok-{{ opengrok_version }}.tar.gz"
+        dest: "/tmp/opengrok-{{ opengrok_version }}.tar.gz"
+        mode: '0644'
+
+    - name: Extract OpenGrok
+      unarchive:
+        src: "/tmp/opengrok-{{ opengrok_version }}.tar.gz"
+        dest: "{{ opengrok_home }}"
+        remote_src: yes
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        creates: "{{ opengrok_home }}/opengrok-{{ opengrok_version }}"
+
+    - name: Create OpenGrok symlink
+      file:
+        src: "{{ opengrok_home }}/opengrok-{{ opengrok_version }}"
+        dest: "{{ opengrok_home }}/current"
+        state: link
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+
+    # Install Tomcat for OpenGrok web interface
+    - name: Download Tomcat 10
+      get_url:
+        url: "https://archive.apache.org/dist/tomcat/tomcat-10/v10.1.15/bin/apache-tomcat-10.1.15.tar.gz"
+        dest: "/tmp/apache-tomcat-10.1.15.tar.gz"
+        mode: '0644'
+
+    - name: Extract Tomcat
+      unarchive:
+        src: "/tmp/apache-tomcat-10.1.15.tar.gz"
+        dest: "/opt"
+        remote_src: yes
+        creates: "/opt/apache-tomcat-10.1.15"
+
+    - name: Create Tomcat symlink
+      file:
+        src: "/opt/apache-tomcat-10.1.15"
+        dest: "{{ tomcat_home }}"
+        state: link
+
+    - name: Set Tomcat ownership
+      file:
+        path: "{{ tomcat_home }}"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        recurse: yes
+        state: directory
+
+    # Configure OpenGrok
+    - name: Create OpenGrok configuration file
+      template:
+        src: opengrok_configuration.xml.j2
+        dest: "{{ opengrok_etc }}/configuration.xml"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0644'
+      notify: restart opengrok
+
+    - name: Create OpenGrok logging configuration
+      template:
+        src: logging.properties.j2
+        dest: "{{ opengrok_etc }}/logging.properties"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0644'
+
+    # Deploy OpenGrok web application
+    - name: Deploy OpenGrok source.war to Tomcat
+      copy:
+        src: "{{ opengrok_home }}/current/lib/source.war"
+        dest: "{{ tomcat_home }}/webapps/source.war"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0644'
+        remote_src: yes
+
+    # Create OpenGrok scripts
+    - name: Create OpenGrok indexer script
+      template:
+        src: opengrok-indexer.sh.j2
+        dest: "{{ opengrok_home }}/bin/opengrok-indexer.sh"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    - name: Create OpenGrok sync script
+      template:
+        src: opengrok-sync.py.j2
+        dest: "{{ opengrok_home }}/bin/opengrok-sync.py"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_group }}"
+        mode: '0755'
+
+    # Create systemd services
+    - name: Create Tomcat systemd service
+      template:
+        src: tomcat.service.j2
+        dest: /etc/systemd/system/tomcat-opengrok.service
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart tomcat
+
+    - name: Create OpenGrok indexer service
+      template:
+        src: opengrok-indexer.service.j2
+        dest: /etc/systemd/system/opengrok-indexer.service
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create OpenGrok indexer timer
+      template:
+        src: opengrok-indexer.timer.j2
+        dest: /etc/systemd/system/opengrok-indexer.timer
+        mode: '0644'
+      notify: reload systemd
+
+    # Configure firewall
+    - name: Open firewall for Tomcat
+      firewalld:
+        port: 8080/tcp
+        permanent: true
+        state: enabled
+        immediate: true
+
+    # SELinux configuration
+    - name: Set SELinux context for OpenGrok directories
+      sefcontext:
+        target: "{{ item }}(/.*)?"
+        setype: tomcat_var_lib_t
+      loop:
+        - "{{ opengrok_data }}"
+        - "{{ opengrok_src }}"
+      when: ansible_selinux.status == "enabled"
+
+    - name: Apply SELinux context
+      command: restorecon -R {{ item }}
+      loop:
+        - "{{ opengrok_data }}"
+        - "{{ opengrok_src }}"
+      when: ansible_selinux.status == "enabled"
+
+    - name: Allow Tomcat to connect to network
+      seboolean:
+        name: tomcat_can_network_connect
+        state: true
+        persistent: true
+      when: ansible_selinux.status == "enabled"
+
+    # Start and enable services
+    - name: Start and enable Tomcat service
+      systemd:
+        name: tomcat-opengrok
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Enable OpenGrok indexer timer
+      systemd:
+        name: opengrok-indexer.timer
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    # Create sample repository
+    - name: Create sample Git repository
+      git:
+        repo: https://github.com/oracle/opengrok.git
+        dest: "{{ opengrok_src }}/opengrok-sample"
+        depth: 1
+      become_user: "{{ opengrok_user }}"
+      when: create_sample_repo | default(false)
+
+    # Run initial indexing
+    - name: Run initial OpenGrok indexing
+      command: "{{ opengrok_home }}/bin/opengrok-indexer.sh"
+      become_user: "{{ opengrok_user }}"
+      async: 600
+      poll: 0
+      register: initial_index
+
+    - name: Wait for initial indexing to complete
+      async_status:
+        jid: "{{ initial_index.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 30
+      delay: 20
+      become_user: "{{ opengrok_user }}"
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart tomcat
+      systemd:
+        name: tomcat-opengrok
+        state: restarted
+
+    - name: restart opengrok
+      systemd:
+        name: tomcat-opengrok
+        state: restarted
+
+  post_tasks:
+    - name: Display OpenGrok access information
+      debug:
+        msg:
+          - "OpenGrok installation completed successfully!"
+          - "Web interface: http://{{ ansible_default_ipv4.address }}:8080/source"
+          - "Configuration file: {{ opengrok_etc }}/configuration.xml"
+          - "Source directory: {{ opengrok_src }}"
+          - "Log files: {{ opengrok_log }}"
+          - "To add repositories: place them in {{ opengrok_src }} and run indexer"
+          - "Indexer script: {{ opengrok_home }}/bin/opengrok-indexer.sh"
+          - "Python sync tool: {{ opengrok_home }}/bin/opengrok-sync.py"
