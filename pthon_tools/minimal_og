@@ -1,0 +1,280 @@
+---
+- name: Install and Configure OpenGrok
+  hosts: 192.168.1.107
+  become: yes
+  vars:
+    opengrok_version: "1.13.8"
+    opengrok_home: "/opt/opengrok"
+    opengrok_src: "/opt/opengrok/src"
+    opengrok_data: "/opt/opengrok/data"
+    opengrok_war: "/opt/opengrok/lib/source.war"
+    tomcat_webapps: "/opt/tomcat/webapps"
+    gitlab_repo_path: "/opt/gitlab/git-data/repositories"
+    opengrok_user: "opengrok"
+
+  tasks:
+    - name: Create OpenGrok user
+      user:
+        name: "{{ opengrok_user }}"
+        system: yes
+        shell: /bin/bash
+        home: "{{ opengrok_home }}"
+        create_home: no
+
+    - name: Create OpenGrok directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_user }}"
+        mode: '0755'
+      loop:
+        - "{{ opengrok_home }}"
+        - "{{ opengrok_src }}"
+        - "{{ opengrok_data }}"
+        - "{{ opengrok_home }}/bin"
+        - "{{ opengrok_home }}/lib"
+        - "{{ opengrok_home }}/etc"
+        - "{{ opengrok_home }}/log"
+
+    - name: Download OpenGrok
+      get_url:
+        url: "https://github.com/oracle/opengrok/releases/download/{{ opengrok_version }}/opengrok-{{ opengrok_version }}.tar.gz"
+        dest: "/tmp/opengrok-{{ opengrok_version }}.tar.gz"
+        mode: '0644'
+
+    - name: Extract OpenGrok
+      unarchive:
+        src: "/tmp/opengrok-{{ opengrok_version }}.tar.gz"
+        dest: "/tmp"
+        remote_src: yes
+
+    - name: Copy OpenGrok files
+      shell: |
+        cp -r /tmp/opengrok-{{ opengrok_version }}/bin/* {{ opengrok_home }}/bin/
+        cp -r /tmp/opengrok-{{ opengrok_version }}/lib/* {{ opengrok_home }}/lib/
+        cp -r /tmp/opengrok-{{ opengrok_version }}/doc {{ opengrok_home }}/
+      args:
+        creates: "{{ opengrok_home }}/bin/opengrok"
+
+    - name: Set ownership of OpenGrok files
+      file:
+        path: "{{ opengrok_home }}"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_user }}"
+        recurse: yes
+
+    - name: Install Python dependencies
+      package:
+        name:
+          - python3
+          - python3-pip
+        state: present
+
+    - name: Install OpenGrok Python tools dependencies
+      pip:
+        name:
+          - requests
+          - filelock
+        executable: pip3
+
+    - name: Copy OpenGrok Python scripts
+      shell: |
+        cp /tmp/opengrok-{{ opengrok_version }}/tools/opengrok-* {{ opengrok_home }}/bin/
+        chmod +x {{ opengrok_home }}/bin/opengrok-*
+      args:
+        creates: "{{ opengrok_home }}/bin/opengrok-deploy"
+
+    - name: Create OpenGrok configuration file
+      copy:
+        content: |
+          # OpenGrok Configuration
+          OPENGROK_INSTANCE_BASE="{{ opengrok_data }}"
+          OPENGROK_VERBOSE="true"
+          OPENGROK_PROGRESS="true"
+          READ_XML_CONFIGURATION="{{ opengrok_data }}/configuration.xml"
+          LOGGER_CONFIG_PATH="{{ opengrok_home }}/etc/logging.properties"
+          INDEXER_OPTIONS="-c /usr/bin/ctags"
+          JAVA_OPTS="-Xmx2048m -server"
+        dest: "{{ opengrok_home }}/etc/opengrok.conf"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_user }}"
+        mode: '0644'
+
+    - name: Create logging configuration
+      copy:
+        content: |
+          handlers = java.util.logging.FileHandler, java.util.logging.ConsoleHandler
+          java.util.logging.FileHandler.pattern = {{ opengrok_home }}/log/opengrok%g.%u.log
+          java.util.logging.FileHandler.formatter = java.util.logging.SimpleFormatter
+          java.util.logging.FileHandler.level = INFO
+          java.util.logging.FileHandler.count = 30
+          java.util.logging.ConsoleHandler.level = WARNING
+          java.util.logging.ConsoleHandler.formatter = java.util.logging.SimpleFormatter
+          org.opengrok.level = INFO
+        dest: "{{ opengrok_home }}/etc/logging.properties"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_user }}"
+        mode: '0644'
+
+    - name: Install ctags for source code indexing
+      package:
+        name: universal-ctags
+        state: present
+
+    - name: Deploy OpenGrok WAR to Tomcat
+      copy:
+        src: "{{ opengrok_home }}/lib/source.war"
+        dest: "{{ tomcat_webapps }}/source.war"
+        remote_src: yes
+        owner: tomcat
+        group: tomcat
+        mode: '0644'
+      notify: restart tomcat
+
+    - name: Create GitLab repository sync script
+      copy:
+        content: |
+          #!/bin/bash
+          # Sync GitLab repositories to OpenGrok source directory
+          
+          GITLAB_REPOS="{{ gitlab_repo_path }}"
+          OPENGROK_SRC="{{ opengrok_src }}"
+          
+          # Create source directory if it doesn't exist
+          mkdir -p "$OPENGROK_SRC"
+          
+          # Sync repositories (excluding .git directories for indexing)
+          for repo in "$GITLAB_REPOS"/*/*.git; do
+              if [ -d "$repo" ]; then
+                  repo_name=$(basename $(dirname "$repo"))
+                  group_name=$(basename $(dirname $(dirname "$repo")))
+                  dest_dir="$OPENGROK_SRC/${group_name}_${repo_name}"
+                  
+                  echo "Syncing $repo to $dest_dir"
+                  
+                  # Clone or update repository
+                  if [ ! -d "$dest_dir" ]; then
+                      git clone "$repo" "$dest_dir"
+                  else
+                      cd "$dest_dir" && git pull origin
+                  fi
+              fi
+          done
+          
+          # Set permissions
+          chown -R {{ opengrok_user }}:{{ opengrok_user }} "$OPENGROK_SRC"
+        dest: "{{ opengrok_home }}/bin/sync-gitlab-repos.sh"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_user }}"
+        mode: '0755'
+
+    - name: Create OpenGrok indexing script
+      copy:
+        content: |
+          #!/bin/bash
+          # OpenGrok indexing script
+          
+          source {{ opengrok_home }}/etc/opengrok.conf
+          
+          # Run the indexer
+          java -Djava.util.logging.config.file="{{ opengrok_home }}/etc/logging.properties" \
+               -jar {{ opengrok_home }}/lib/opengrok.jar \
+               -c /usr/bin/ctags \
+               -s {{ opengrok_src }} \
+               -d {{ opengrok_data }} \
+               -H -P -S -G \
+               -W {{ opengrok_data }}/configuration.xml \
+               -U http://localhost:8080/source
+        dest: "{{ opengrok_home }}/bin/index-repos.sh"
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_user }}"
+        mode: '0755'
+
+    - name: Create systemd service for OpenGrok reindexing
+      copy:
+        content: |
+          [Unit]
+          Description=OpenGrok Repository Sync and Reindex
+          After=network.target
+          
+          [Service]
+          Type=oneshot
+          User={{ opengrok_user }}
+          Group={{ opengrok_user }}
+          ExecStart=/bin/bash -c "{{ opengrok_home }}/bin/sync-gitlab-repos.sh && {{ opengrok_home }}/bin/index-repos.sh"
+          WorkingDirectory={{ opengrok_home }}
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/opengrok-reindex.service
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd timer for automatic reindexing
+      copy:
+        content: |
+          [Unit]
+          Description=Run OpenGrok reindexing every 4 hours
+          Requires=opengrok-reindex.service
+          
+          [Timer]
+          OnCalendar=*-*-* 00,04,08,12,16,20:00:00
+          Persistent=true
+          
+          [Install]
+          WantedBy=timers.target
+        dest: /etc/systemd/system/opengrok-reindex.timer
+        mode: '0644'
+      notify:
+        - reload systemd
+        - enable opengrok timer
+
+    - name: Initial repository sync
+      shell: "{{ opengrok_home }}/bin/sync-gitlab-repos.sh"
+      become_user: "{{ opengrok_user }}"
+      args:
+        creates: "{{ opengrok_src }}/.synced"
+
+    - name: Mark initial sync complete
+      file:
+        path: "{{ opengrok_src }}/.synced"
+        state: touch
+        owner: "{{ opengrok_user }}"
+        group: "{{ opengrok_user }}"
+
+    - name: Wait for Tomcat to deploy WAR
+      wait_for:
+        path: "{{ tomcat_webapps }}/source"
+        state: present
+        timeout: 60
+
+    - name: Initial OpenGrok indexing
+      shell: "{{ opengrok_home }}/bin/index-repos.sh"
+      become_user: "{{ opengrok_user }}"
+      async: 300
+      poll: 10
+
+    - name: Clean up temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/opengrok-{{ opengrok_version }}.tar.gz"
+        - "/tmp/opengrok-{{ opengrok_version }}"
+
+  handlers:
+    - name: restart tomcat
+      systemd:
+        name: tomcat
+        state: restarted
+
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: enable opengrok timer
+      systemd:
+        name: opengrok-reindex.timer
+        enabled: yes
+        state: started
