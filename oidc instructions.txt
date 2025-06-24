@@ -1,0 +1,72 @@
+To configure OpenGrok to use OpenID Connect authentication with Keycloak using Ansible, you'll need to modify the OpenGrok configuration and potentially install additional components. Here's how to approach this:
+
+## Prerequisites
+
+First, ensure you have:
+- A Keycloak realm configured with an OpenID Connect client for OpenGrok
+- The client credentials (client ID and secret) from Keycloak
+- Network connectivity between OpenGrok and Keycloak
+
+## Ansible Playbook Structure
+
+Here's an Ansible playbook to configure OpenGrok with Keycloak OIDC:Now, let's create the necessary template files:## Keycloak Client Configuration
+
+Before running the Ansible playbook, you need to configure a client in Keycloak:
+
+1. **Create a new client in your Keycloak realm:**
+   - Client ID: `opengrok-client`
+   - Client Protocol: `openid-connect`
+   - Access Type: `confidential`
+   - Valid Redirect URIs: `https://your-opengrok-server.domain.com/callback`
+   - Web Origins: `https://your-opengrok-server.domain.com`
+
+2. **Configure client scopes and mappers:**
+   - Add `email`, `profile`, and `groups` scopes
+   - Create a group membership mapper to include user groups in tokens
+
+## Inventory File
+
+Create an inventory file (`inventory.yml`):
+
+```yaml
+all:
+  children:
+    opengrok_servers:
+      hosts:
+        opengrok-vm:
+          ansible_host: your-opengrok-vm-ip
+          ansible_user: your-ssh-user
+      vars:
+        opengrok_version: "1.7.44"  # Adjust to your version
+```
+
+## Vault File for Secrets
+
+Create an encrypted vault file for sensitive data:
+
+```bash
+ansible-vault create group_vars/all/vault.yml
+```
+
+Add the Keycloak client secret:
+```yaml
+vault_keycloak_client_secret: "your-actual-client-secret-from-keycloak"
+```
+
+## Running the Playbook
+
+Execute the playbook:
+
+```bash
+ansible-playbook -i inventory.yml opengrok-keycloak.yml --ask-vault-pass
+```
+
+## Additional Considerations
+
+1. **SSL/TLS**: Ensure both OpenGrok and Keycloak are running over HTTPS for security
+2. **Firewall**: Make sure the OpenGrok server can reach Keycloak on the required ports
+3. **Groups/Roles**: Configure appropriate group mappings in Keycloak that correspond to your OpenGrok authorization requirements
+4. **Testing**: Test the authentication flow thoroughly after deployment
+5. **Backup**: The playbook includes backup options for critical configuration files
+
+This configuration assumes you're using a relatively recent version of OpenGrok that supports OIDC authentication. If you're using an older version, you might need to implement a custom authentication filter or consider upgrading OpenGrok first.
