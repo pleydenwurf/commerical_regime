@@ -1,0 +1,88 @@
+---
+- name: Configure OpenGrok with Built-in Keycloak OIDC Authentication
+  hosts: opengrok_servers
+  become: yes
+  vars:
+    opengrok_home: /opt/opengrok
+    opengrok_data: /var/opengrok
+    keycloak_url: "https://your-keycloak-server.domain.com"
+    keycloak_realm: "your-realm"
+    keycloak_client_id: "opengrok-client"
+    keycloak_client_secret: "{{ vault_keycloak_client_secret }}"
+    opengrok_url: "https://your-opengrok-server.domain.com"
+    
+  tasks:
+    - name: Stop OpenGrok service for configuration
+      service:
+        name: tomcat
+        state: stopped
+
+    - name: Create OpenGrok configuration directory if it doesn't exist
+      file:
+        path: "{{ opengrok_data }}/etc"
+        state: directory
+        owner: tomcat
+        group: tomcat
+        mode: '0755'
+
+    - name: Create or update OpenGrok configuration with OIDC settings
+      template:
+        src: configuration.xml.j2
+        dest: "{{ opengrok_data }}/etc/configuration.xml"
+        owner: tomcat
+        group: tomcat
+        mode: '0644'
+        backup: yes
+      notify: restart tomcat
+
+    - name: Set up OpenGrok web application properties
+      template:
+        src: web.properties.j2
+        dest: "{{ opengrok_data }}/etc/web.properties"
+        owner: tomcat
+        group: tomcat
+        mode: '0644'
+      notify: restart tomcat
+
+    - name: Ensure proper ownership of OpenGrok directories
+      file:
+        path: "{{ item }}"
+        owner: tomcat
+        group: tomcat
+        recurse: yes
+        state: directory
+      loop:
+        - "{{ opengrok_data }}"
+        - "{{ opengrok_home }}"
+
+    - name: Start OpenGrok service
+      service:
+        name: tomcat
+        state: started
+        enabled: yes
+
+    - name: Wait for OpenGrok to be available
+      uri:
+        url: "{{ opengrok_url }}/api/v1/configuration"
+        method: GET
+        status_code: [200, 302]
+      retries: 30
+      delay: 10
+      register: opengrok_health
+      
+    - name: Display OpenGrok status
+      debug:
+        msg: "OpenGrok is now running with OIDC authentication enabled"
+      when: opengrok_health is succeeded
+
+  handlers:
+    - name: restart tomcat
+      service:
+        name: tomcat
+        state: restarted
+        
+    - name: wait for tomcat
+      wait_for:
+        port: 8080
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 10
