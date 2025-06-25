@@ -1,0 +1,83 @@
+# Example of what your existing Apache virtual host might look like after modification
+# This would be added to your existing SSL virtual host configuration
+
+<VirtualHost *:443>
+    ServerName your-opengrok-server.domain.com
+    DocumentRoot /var/lib/tomcat9/webapps/opengrok
+    
+    # Your existing SSL configuration
+    SSLEngine on
+    SSLCertificateFile /path/to/your/cert.crt
+    SSLCertificateKeyFile /path/to/your/private.key
+    
+    # OIDC Configuration - ADD THIS SECTION
+    OIDCProviderMetadataURL https://your-keycloak-server.domain.com/realms/your-realm/.well-known/openid_configuration
+    OIDCClientID opengrok-client
+    OIDCClientSecret your-client-secret
+    OIDCRedirectURI https://your-opengrok-server.domain.com/oidc_redirect
+    OIDCPostLogoutRedirectURI https://your-opengrok-server.domain.com/
+    
+    # Crypto settings
+    OIDCCryptoPassphrase your-random-passphrase-here
+    
+    # Session settings
+    OIDCSessionMaxDuration 3600
+    OIDCSessionInactivityTimeout 1800
+    
+    # Claims and user info
+    OIDCScope "openid profile email groups"
+    OIDCRemoteUserClaim preferred_username
+    OIDCPassClaimsAs headers
+    
+    # Cache settings
+    OIDCCacheType shm
+    OIDCCacheShmMax 500
+    
+    # Your existing Tomcat/OpenGrok configuration (mod_jk or mod_proxy_ajp)
+    # For example, if using mod_jk:
+    # JkMount /* ajp13_worker
+    
+    # Or if using mod_proxy_ajp:
+    # ProxyPreserveHost On
+    # ProxyPass / ajp://localhost:8009/
+    # ProxyPassReverse / ajp://localhost:8009/
+    
+    # OIDC Protection - ADD THIS SECTION
+    <Location />
+        AuthType openid-connect
+        Require valid-user
+        
+        # Pass user information to OpenGrok
+        RequestHeader set X-Forwarded-User %{OIDC_CLAIM_preferred_username}e
+        RequestHeader set X-Forwarded-Email %{OIDC_CLAIM_email}e  
+        RequestHeader set X-Forwarded-Groups %{OIDC_CLAIM_groups}e
+        RequestHeader set X-Forwarded-Proto https
+    </Location>
+    
+    # OIDC callback - this needs to be accessible
+    <Location /oidc_redirect>
+        AuthType openid-connect
+        Require valid-user
+    </Location>
+    
+    # Optional: Health check without auth
+    <Location /health>
+        AuthType None
+        Require all granted
+    </Location>
+    
+    # Optional: Static assets without auth (if needed)
+    <LocationMatch "^/(css|js|img|favicon\.ico)">
+        AuthType None
+        Require all granted
+    </LocationMatch>
+    
+    # Optional: Logout endpoint
+    <Location /logout>
+        AuthType openid-connect
+        Require valid-user
+        RewriteEngine On
+        RewriteRule ^/logout$ https://your-keycloak-server.domain.com/realms/your-realm/protocol/openid-connect/logout?redirect_uri=https://your-opengrok-server.domain.com/ [R=302,L]
+    </Location>
+    
+</VirtualHost>
