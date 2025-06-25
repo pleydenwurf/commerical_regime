@@ -1,0 +1,143 @@
+---
+- name: Configure existing Apache+Tomcat with Keycloak OIDC Authentication
+  hosts: opengrok_servers
+  become: yes
+  vars:
+    keycloak_url: "https://your-keycloak-server.domain.com"
+    keycloak_realm: "your-realm"
+    keycloak_client_id: "opengrok-client"
+    keycloak_client_secret: "{{ vault_keycloak_client_secret }}"
+    opengrok_url: "https://your-opengrok-server.domain.com"
+    apache_sites_available: "/etc/apache2/sites-available"
+    apache_sites_enabled: "/etc/apache2/sites-enabled"
+    
+  tasks:
+    - name: Install mod_auth_openidc module
+      package:
+        name: libapache2-mod-auth-openidc
+        state: present
+      notify: restart apache
+
+    - name: Enable required Apache modules
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - auth_openidc
+        - headers
+        - rewrite
+      notify: restart apache
+
+    - name: Create directory for OIDC metadata cache
+      file:
+        path: /var/cache/apache2/mod_auth_openidc/metadata
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0700'
+
+    - name: Backup existing Apache site configuration
+      copy:
+        src: "{{ apache_sites_available }}/{{ apache_site_name | default('000-default-ssl') }}.conf"
+        dest: "{{ apache_sites_available }}/{{ apache_site_name | default('000-default-ssl') }}.conf.backup-{{ ansible_date_time.epoch }}"
+        remote_src: yes
+        backup: yes
+      ignore_errors: yes
+
+    - name: Update existing Apache virtual host with OIDC configuration
+      blockinfile:
+        path: "{{ apache_sites_available }}/{{ apache_site_name | default('000-default-ssl') }}.conf"
+        marker: "    # {mark} ANSIBLE MANAGED OIDC CONFIG"
+        insertafter: "ServerName"
+        block: |
+          # OIDC Configuration
+          OIDCProviderMetadataURL {{ keycloak_url }}/realms/{{ keycloak_realm }}/.well-known/openid_configuration
+          OIDCClientID {{ keycloak_client_id }}
+          OIDCClientSecret {{ keycloak_client_secret }}
+          OIDCRedirectURI {{ opengrok_url }}/oidc_redirect
+          OIDCPostLogoutRedirectURI {{ opengrok_url }}/
+          
+          # Crypto settings
+          OIDCCryptoPassphrase {{ oidc_crypto_passphrase | default('changeme-generate-random-string') }}
+          
+          # Session settings
+          OIDCSessionMaxDuration 3600
+          OIDCSessionInactivityTimeout 1800
+          
+          # Claims and user info
+          OIDCScope "openid profile email groups"
+          OIDCRemoteUserClaim preferred_username
+          OIDCPassClaimsAs headers
+          
+          # Cache settings
+          OIDCCacheType shm
+          OIDCCacheShmMax 500
+        backup: yes
+      notify: restart apache
+
+    - name: Add OIDC authentication to OpenGrok location
+      blockinfile:
+        path: "{{ apache_sites_available }}/{{ apache_site_name | default('000-default-ssl') }}.conf"
+        marker: "    # {mark} ANSIBLE MANAGED OPENGROK OIDC LOCATION"
+        insertbefore: "</VirtualHost>"
+        block: |
+          # Protect OpenGrok with OIDC authentication
+          <Location />
+              AuthType openid-connect
+              Require valid-user
+              
+              # Pass user information to OpenGrok via headers
+              RequestHeader set X-Forwarded-User %{OIDC_CLAIM_preferred_username}e
+              RequestHeader set X-Forwarded-Email %{OIDC_CLAIM_email}e
+              RequestHeader set X-Forwarded-Groups %{OIDC_CLAIM_groups}e
+              RequestHeader set X-Forwarded-Proto https
+          </Location>
+          
+          # OIDC callback endpoint
+          <Location /oidc_redirect>
+              AuthType openid-connect
+              Require valid-user
+          </Location>
+          
+          # Optional: Public health check endpoint
+          <Location /health>
+              AuthType None
+              Require all granted
+          </Location>
+          
+          # Optional: Static assets without authentication
+          <LocationMatch "^/(css|js|img|favicon)">
+              AuthType None
+              Require all granted
+          </LocationMatch>
+          
+          # Optional: Logout endpoint
+          <Location /logout>
+              AuthType openid-connect
+              Require valid-user
+              RewriteEngine On
+              RewriteRule ^/logout$ {{ keycloak_url }}/realms/{{ keycloak_realm }}/protocol/openid-connect/logout?redirect_uri={{ opengrok_url }}/ [R=302,L]
+          </Location>
+        backup: yes
+      notify: restart apache
+
+    - name: Test Apache configuration
+      command: apache2ctl configtest
+      register: apache_config_test
+      changed_when: false
+
+    - name: Display Apache config test result
+      debug:
+        var: apache_config_test.stdout_lines
+
+    - name: Ensure Apache is running
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart apache
+      service:
+        name: apache2
+        state: restarted
