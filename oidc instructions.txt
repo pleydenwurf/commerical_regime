@@ -222,3 +222,107 @@ Yes, this playbook is correct and safe for your scenario.
 It’s designed to be a “layer” on top of an existing Apache+Tomcat+OpenGrok stack.
 It minimizes disruption and only changes what’s needed for OIDC.
 Backups and config tests are included for safety.
+
+__________________________________________________________
+Here’s what you’d change/add to your existing preapache_oidc.yml playbook:
+
+1. Add Variables for SSL Cert and Key Paths
+Add variables at the top for certificate and key file locations, for example:
+
+YAML
+apache_ssl_cert: "/etc/ssl/certs/opengrok.crt"
+apache_ssl_key: "/etc/ssl/private/opengrok.key"
+2. (Optional) Add Tasks to Deploy SSL Certificate and Key
+If you want Ansible to copy certificate files (instead of you placing them manually):
+
+YAML
+- name: Copy SSL certificate
+  copy:
+    src: "files/opengrok.crt"
+    dest: "{{ apache_ssl_cert }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Copy SSL private key
+  copy:
+    src: "files/opengrok.key"
+    dest: "{{ apache_ssl_key }}"
+    owner: root
+    group: root
+    mode: '0600'
+Or, if you use Let’s Encrypt, you could reference /etc/letsencrypt/live/<domain>/fullchain.pem and privkey.pem.
+
+3. Ensure Apache SSL Module Is Enabled
+Add ssl to the modules enabled:
+
+YAML
+- name: Enable required Apache modules
+  apache2_module:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - ssl
+    # (other modules)
+4. Update Apache Site Configuration for SSL
+Edit your Apache site config (the .conf file you’re modifying via Ansible) to ensure it has a <VirtualHost *:443> block similar to:
+
+apache
+<VirtualHost *:443>
+    ServerName {{ ansible_fqdn }}
+    SSLEngine on
+    SSLCertificateFile {{ apache_ssl_cert }}
+    SSLCertificateKeyFile {{ apache_ssl_key }}
+    # ... rest of your OIDC config and proxy settings ...
+</VirtualHost>
+If you use Ansible’s blockinfile, you can add a block for the SSL directives if not present.
+
+5. (Optional) Redirect HTTP to HTTPS
+You may want to redirect all HTTP traffic to HTTPS. Add this to your port 80 <VirtualHost> or as a block in your config:
+
+apache
+<VirtualHost *:80>
+    ServerName {{ ansible_fqdn }}
+    Redirect permanent / https://{{ ansible_fqdn }}/
+</VirtualHost>
+6. Reload/Restart Apache
+This is already handled by your playbook when config changes occur.
+
+Summary of Changes Needed
+Add/define variables for cert and key paths
+Add (optional) tasks to deploy cert and key files
+Enable Apache ssl module
+Ensure your Apache config has SSL directives in the proper <VirtualHost *:443> block, referencing your cert and key
+(Optional) Add HTTP-to-HTTPS redirection
+Test with apache2ctl configtest and reload Apache
+
+Heres a snippet to add to copy certificates if needed.
+- name: Copy SSL certificate to Apache
+  copy:
+    src: files/opengrok.crt
+    dest: /etc/ssl/certs/opengrok.crt
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Copy SSL private key to Apache
+  copy:
+    src: files/opengrok.key
+    dest: /etc/ssl/private/opengrok.key
+    owner: root
+    group: root
+    mode: '0600'
+
+
+How to use:
+
+Place your certificate (opengrok.crt) and key (opengrok.key) in the files/ directory of your Ansible project.
+Adjust the dest paths if your Apache expects them in different locations.
+Make sure your Apache SSL config references these paths:
+
+SSLCertificateFile /etc/ssl/certs/opengrok.crt
+SSLCertificateKeyFile /etc/ssl/private/opengrok.key
+
+Tip:
+Add these tasks before your Apache config/enable/restart steps, so the files are in place before Apache reloads.
+
