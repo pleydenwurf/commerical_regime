@@ -1,5 +1,5 @@
 ---
-- name: Configure OpenGrok with Built-in Keycloak OIDC Authentication
+- name: Configure OpenGrok with Keycloak OIDC Authentication
   hosts: opengrok_servers
   become: yes
   vars:
@@ -12,7 +12,7 @@
     opengrok_url: "https://your-opengrok-server.domain.com"
     
   tasks:
-    - name: Stop OpenGrok service for configuration
+    - name: Ensure OpenGrok service is stopped before configuration
       service:
         name: tomcat
         state: stopped
@@ -25,35 +25,29 @@
         group: tomcat
         mode: '0755'
 
-    - name: Create or update OpenGrok configuration with OIDC settings
-      template:
-        src: configuration.xml.j2
-        dest: "{{ opengrok_data }}/etc/configuration.xml"
-        owner: tomcat
-        group: tomcat
-        mode: '0644'
+    - name: Configure OpenGrok with OIDC settings
+      lineinfile:
+        path: "{{ opengrok_data }}/etc/configuration.xml"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: yes
+      loop:
+        - { regexp: '<authenticationClass>', line: '    <authenticationClass>org.opengrok.indexer.authorization.plugins.OidcPlugin</authenticationClass>' }
+        - { regexp: '<oidcClientId>', line: '    <oidcClientId>{{ keycloak_client_id }}</oidcClientId>' }
+        - { regexp: '<oidcClientSecret>', line: '    <oidcClientSecret>{{ keycloak_client_secret }}</oidcClientSecret>' }
+        - { regexp: '<oidcDiscoveryUrl>', line: '    <oidcDiscoveryUrl>{{ keycloak_url }}/realms/{{ keycloak_realm }}/.well-known/openid_configuration</oidcDiscoveryUrl>' }
+        - { regexp: '<oidcRedirectUri>', line: '    <oidcRedirectUri>{{ opengrok_url }}/api/v1/auth/callback</oidcRedirectUri>' }
+      notify: restart tomcat
+
+    - name: Enable authentication in OpenGrok configuration
+      xml:
+        path: "{{ opengrok_data }}/etc/configuration.xml"
+        xpath: "//configuration"
+        add_children:
+          - authenticationEnabled: "true"
+          - authorizationEnabled: "true"
         backup: yes
       notify: restart tomcat
-
-    - name: Set up OpenGrok web application properties
-      template:
-        src: web.properties.j2
-        dest: "{{ opengrok_data }}/etc/web.properties"
-        owner: tomcat
-        group: tomcat
-        mode: '0644'
-      notify: restart tomcat
-
-    - name: Ensure proper ownership of OpenGrok directories
-      file:
-        path: "{{ item }}"
-        owner: tomcat
-        group: tomcat
-        recurse: yes
-        state: directory
-      loop:
-        - "{{ opengrok_data }}"
-        - "{{ opengrok_home }}"
 
     - name: Start OpenGrok service
       service:
@@ -61,28 +55,43 @@
         state: started
         enabled: yes
 
-    - name: Wait for OpenGrok to be available
-      uri:
-        url: "{{ opengrok_url }}/api/v1/configuration"
-        method: GET
-        status_code: [200, 302]
-      retries: 30
-      delay: 10
-      register: opengrok_health
-      
-    - name: Display OpenGrok status
-      debug:
-        msg: "OpenGrok is now running with OIDC authentication enabled"
-      when: opengrok_health is succeeded
+
+
+    - name: Set proper permissions on configuration files
+      file:
+        path: "{{ item }}"
+        owner: tomcat
+        group: tomcat
+        recurse: yes
+      loop:
+        - "{{ opengrok_data }}/etc"
+        - /var/lib/tomcat/webapps/opengrok/WEB-INF
 
   handlers:
     - name: restart tomcat
       service:
         name: tomcat
         state: restarted
-        
-    - name: wait for tomcat
-      wait_for:
-        port: 8080
-        host: "{{ ansible_default_ipv4.address }}"
-        delay: 10
+
+# Additional tasks for SSL/TLS configuration if needed
+- name: Configure SSL certificates
+  hosts: opengrok_servers
+  become: yes
+  tasks:
+    - name: Copy SSL certificate
+      copy:
+        src: "{{ ssl_cert_path }}"
+        dest: /etc/ssl/certs/opengrok.crt
+        owner: root
+        group: root
+        mode: '0644'
+      when: ssl_cert_path is defined
+
+    - name: Copy SSL private key
+      copy:
+        src: "{{ ssl_key_path }}"
+        dest: /etc/ssl/private/opengrok.key
+        owner: root
+        group: root
+        mode: '0600'
+      when: ssl_key_path is defined
