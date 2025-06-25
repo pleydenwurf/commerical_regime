@@ -1,0 +1,105 @@
+# Template: templates/opengrok-oidc.conf.j2
+# Apache Virtual Host for OpenGrok with Keycloak OIDC Authentication
+
+<VirtualHost *:80>
+    ServerName {{ ansible_fqdn }}
+    DocumentRoot /var/www/html
+    
+    # Redirect all HTTP to HTTPS
+    RewriteEngine On
+    RewriteCond %{HTTPS} off
+    RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName {{ ansible_fqdn }}
+    DocumentRoot /var/www/html
+    
+    # SSL Configuration
+    SSLEngine on
+    SSLCertificateFile {{ apache_ssl_cert }}
+    SSLCertificateKeyFile {{ apache_ssl_key }}
+    
+    # Security headers
+    Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+    Header always set X-Frame-Options DENY
+    Header always set X-Content-Type-Options nosniff
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    
+    # OIDC Configuration
+    OIDCProviderMetadataURL {{ keycloak_url }}/realms/{{ keycloak_realm }}/.well-known/openid_configuration
+    OIDCClientID {{ keycloak_client_id }}
+    OIDCClientSecret {{ keycloak_client_secret }}
+    OIDCRedirectURI https://{{ ansible_fqdn }}/oidc_redirect
+    OIDCPostLogoutRedirectURI https://{{ ansible_fqdn }}/
+    
+    # Crypto settings
+    OIDCCryptoPassphrase {{ oidc_crypto_passphrase | default('changeme-generate-random-string') }}
+    
+    # Session settings
+    OIDCSessionMaxDuration 3600
+    OIDCSessionInactivityTimeout 1800
+    
+    # Claims and user info
+    OIDCScope "openid profile email groups"
+    OIDCRemoteUserClaim preferred_username
+    OIDCPassClaimsAs headers
+    
+    # Cache settings for better performance
+    OIDCCacheType shm
+    OIDCCacheShmMax 500
+    
+    # Logging (adjust level as needed: error, warn, info, debug)
+    LogLevel auth_openidc:info
+    ErrorLog ${APACHE_LOG_DIR}/opengrok_error.log
+    CustomLog ${APACHE_LOG_DIR}/opengrok_access.log combined
+    
+    # Protected location - require authentication for all OpenGrok content
+    <Location />
+        AuthType openid-connect
+        Require valid-user
+        
+        # Pass user information to OpenGrok
+        ProxyPreserveHost On
+        ProxyPass http://127.0.0.1:{{ opengrok_internal_port }}/
+        ProxyPassReverse http://127.0.0.1:{{ opengrok_internal_port }}/
+        
+        # Set headers with user information
+        RequestHeader set X-Forwarded-User %{OIDC_CLAIM_preferred_username}e
+        RequestHeader set X-Forwarded-Email %{OIDC_CLAIM_email}e
+        RequestHeader set X-Forwarded-Groups %{OIDC_CLAIM_groups}e
+        RequestHeader set X-Forwarded-Proto https
+    </Location>
+    
+    # Public endpoints that don't require authentication
+    <Location /health>
+        AuthType None
+        Require all granted
+        ProxyPass http://127.0.0.1:{{ opengrok_internal_port }}/health
+        ProxyPassReverse http://127.0.0.1:{{ opengrok_internal_port }}/health
+    </Location>
+    
+    # OIDC callback - this needs to be accessible
+    <Location /oidc_redirect>
+        AuthType openid-connect
+        Require valid-user
+    </Location>
+    
+    # Optional: Logout endpoint
+    <Location /logout>
+        AuthType openid-connect
+        Require valid-user
+        # Redirect to Keycloak logout
+        RewriteEngine On
+        RewriteRule ^/logout$ {{ keycloak_url }}/realms/{{ keycloak_realm }}/protocol/openid-connect/logout?redirect_uri=https://{{ ansible_fqdn }}/ [R=302,L]
+    </Location>
+    
+    # Static assets might not need authentication (optional)
+    <LocationMatch "^/(css|js|img|favicon)">
+        AuthType None
+        Require all granted
+        ProxyPass http://127.0.0.1:{{ opengrok_internal_port }}/
+        ProxyPassReverse http://127.0.0.1:{{ opengrok_internal_port }}/
+    </LocationMatch>
+    
+</VirtualHost>
