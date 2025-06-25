@@ -194,3 +194,31 @@ sudo systemctl restart apache2
 Set the redirect URI to: `https://your-opengrok-server.domain.com/oidc_redirect`
 
 This approach leverages your existing Apache+Tomcat setup and just adds the OIDC authentication layer on top. Much simpler than running two web servers!
+
+_____________________________________________________
+This playbook is well-suited for adding Keycloak OIDC authentication to an existing Apache and Tomcat setup running OpenGrok. Here’s why it matches your use case and what you should check:
+
+What This Playbook Does Well
+Does not reinstall Apache or Tomcat.
+Only installs/enables the necessary modules (mod_auth_openidc, headers, rewrite).
+Edits your existing Apache site configuration (using blockinfile), so it integrates with your current setup.
+Backs up your original Apache config before changes.
+Adds OIDC config and protects OpenGrok with authentication (in the <Location /> block).
+Handles OIDC callback, logout, and optional public/static endpoints.
+Performs an Apache configtest and shows the result.
+Restarts Apache only if needed.
+What You Still Need to Check/Do
+Set apache_site_name variable if your enabled site is not the default (000-default-ssl).
+Example:
+YAML
+-e "apache_site_name=your-opengrok-site"
+Ensure SSL is already configured in your Apache site, since this playbook does not handle SSL certs.
+If you have custom locations or proxy settings for Tomcat/OpenGrok, ensure they are not inadvertently overwritten by this playbook.
+Test that the OIDC callback endpoint (/oidc_redirect) matches your Keycloak client settings.
+Verify your Tomcat instance is only accessible via Apache for security.
+Set a strong oidc_crypto_passphrase.
+Summary
+Yes, this playbook is correct and safe for your scenario.
+It’s designed to be a “layer” on top of an existing Apache+Tomcat+OpenGrok stack.
+It minimizes disruption and only changes what’s needed for OIDC.
+Backups and config tests are included for safety.
