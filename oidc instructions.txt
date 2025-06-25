@@ -147,4 +147,50 @@ Create/update your Apache site config to add OIDC authentication for OpenGrok
 Restart Apache
 You can skip installation and generic setup tasks that are already complete. Let me know if you want a concise checklist or an example of just the essential changes!
 
+________________________________________________________
 
+You're absolutely right to question this! If Tomcat is already running under Apache (likely via mod_jk or mod_proxy_ajp), you don't need a second Apache instance. You can configure OIDC authentication directly in your existing Apache setup.
+
+Let me provide a corrected approach that works with your existing Apache+Tomcat setup:## Key Points for Your Existing Apache+Tomcat Setup:
+
+### 1. **No Second Apache Instance Needed**
+You're absolutely correct - you just need to:
+- Install `libapache2-mod-auth-openidc` package
+- Enable the `auth_openidc` module
+- Modify your existing virtual host configuration
+
+### 2. **Works with Existing Tomcat Integration**
+Whether you're using:
+- **mod_jk** with AJP connector
+- **mod_proxy_ajp** 
+- **mod_proxy_http**
+
+The OIDC authentication layer sits in front of your existing Tomcat integration.
+
+### 3. **Simple Configuration Steps**
+```bash
+# Install the module
+sudo apt install libapache2-mod-auth-openidc
+
+# Enable required modules
+sudo a2enmod auth_openidc headers rewrite
+
+# Modify your existing virtual host config
+sudo nano /etc/apache2/sites-available/your-opengrok-site.conf
+
+# Test and restart
+sudo apache2ctl configtest
+sudo systemctl restart apache2
+```
+
+### 4. **User Information Flow**
+1. User hits Apache
+2. Apache handles OIDC authentication via mod_auth_openidc
+3. Apache sets headers with user info (`X-Forwarded-User`, etc.)
+4. Apache forwards request to Tomcat (your existing setup)
+5. OpenGrok receives the request with user headers
+
+### 5. **Keycloak Client Configuration**
+Set the redirect URI to: `https://your-opengrok-server.domain.com/oidc_redirect`
+
+This approach leverages your existing Apache+Tomcat setup and just adds the OIDC authentication layer on top. Much simpler than running two web servers!
