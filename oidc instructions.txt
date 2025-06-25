@@ -99,3 +99,52 @@ SSL termination - Proxy handles HTTPS
 Session management - Proxy manages OIDC sessions
 
 The Apache approach with mod_auth_openidc is generally recommended due to its maturity and extensive documentation.RetryClaude does not have the ability to run the code it generates yet.Claude can make mistakes. Please double-check responses. Sonnet 4
+
+If you already have an Apache instance running as a reverse proxy in front of Tomcat (which serves OpenGrok), not everything in the provided Ansible script is required. Here’s what you need vs. what you can skip:
+
+What’s Only Needed If Not Already Present
+Apache installation:
+If Apache is already installed and running, you can skip installation steps.
+Tomcat installation & management:
+If Tomcat is already running OpenGrok, you don’t need to manage Tomcat’s installation or service via this script (unless you want Ansible to do it for consistency).
+What You Still Need To Do
+mod_auth_openidc installation:
+You’ll need to install and enable the libapache2-mod-auth-openidc module if it isn’t already enabled.
+Apache module enabling:
+Ensure the necessary Apache modules are enabled: ssl, proxy, proxy_http, headers, rewrite, and auth_openidc.
+Apache site configuration:
+You must deploy (and enable) a site config like opengrok-oidc.conf (or integrate its contents into your existing Apache config) to:
+Set up OIDC with Keycloak
+Proxy requests to Tomcat/OpenGrok
+Enforce authentication
+SSL certificate:
+If your existing Apache instance already has SSL configured for your OpenGrok domain, you don’t need to create or copy new certificates. Just reference them in your site config.
+Tomcat binding:
+It is a security best practice to ensure Tomcat only listens on localhost. If you’ve already done this, you can skip that step.
+Restart services:
+You’ll still need to reload/restart Apache after updating configs.
+What You Can Skip If Already Present
+Creating Apache directories
+Disabling the default Apache site (if you already have your custom config in use)
+Creating self-signed certificates (if you already have valid SSL)
+Creating SSL certificate directory/permissions (if already set up)
+Starting/enabling Tomcat/Apache (if already managed elsewhere)
+Summary Table
+Task	Needed if Already Have Apache+Tomcat?
+Install Apache	No
+Install Tomcat	No
+Install mod_auth_openidc	Yes (if not already installed)
+Enable required Apache modules	Yes (if not already enabled)
+Deploy Apache OIDC site config	Yes
+Configure SSL certificates in Apache site config	Only if not already configured
+Ensure Tomcat binds only to localhost	Yes (if not already done)
+Restart/reload Apache	Yes
+Bottom Line:
+If your Apache already proxies to OpenGrok and handles SSL, you mainly need to:
+
+Install and enable mod_auth_openidc
+Create/update your Apache site config to add OIDC authentication for OpenGrok
+Restart Apache
+You can skip installation and generic setup tasks that are already complete. Let me know if you want a concise checklist or an example of just the essential changes!
+
+
