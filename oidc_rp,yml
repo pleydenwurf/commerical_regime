@@ -1,0 +1,131 @@
+---
+- name: Configure OpenGrok with Keycloak OIDC via Apache Reverse Proxy
+  hosts: opengrok_servers
+  become: yes
+  vars:
+    opengrok_home: /opt/opengrok
+    opengrok_data: /var/opengrok
+    keycloak_url: "https://your-keycloak-server.domain.com"
+    keycloak_realm: "your-realm"
+    keycloak_client_id: "opengrok-client"
+    keycloak_client_secret: "{{ vault_keycloak_client_secret }}"
+    opengrok_url: "https://your-opengrok-server.domain.com"
+    opengrok_internal_port: 8080
+    apache_ssl_cert: "/etc/ssl/certs/opengrok.crt"
+    apache_ssl_key: "/etc/ssl/private/opengrok.key"
+    
+  tasks:
+    - name: Install Apache and required modules
+      package:
+        name:
+          - apache2
+          - libapache2-mod-auth-openidc
+          - ssl-cert
+        state: present
+
+    - name: Enable Apache modules
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - ssl
+        - proxy
+        - proxy_http
+        - headers
+        - rewrite
+        - auth_openidc
+      notify: restart apache
+
+    - name: Create Apache sites-available directory if needed
+      file:
+        path: /etc/apache2/sites-available
+        state: directory
+        mode: '0755'
+
+    - name: Configure Apache virtual host for OpenGrok with OIDC
+      template:
+        src: opengrok-oidc.conf.j2
+        dest: /etc/apache2/sites-available/opengrok-oidc.conf
+        backup: yes
+      notify: restart apache
+
+    - name: Disable default Apache site
+      command: a2dissite 000-default
+      args:
+        removes: /etc/apache2/sites-enabled/000-default.conf
+      notify: restart apache
+
+    - name: Enable OpenGrok OIDC site
+      command: a2ensite opengrok-oidc
+      args:
+        creates: /etc/apache2/sites-enabled/opengrok-oidc.conf
+      notify: restart apache
+
+    - name: Create directory for OIDC metadata
+      file:
+        path: /var/cache/apache2/mod_auth_openidc/metadata
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0700'
+
+    - name: Configure OpenGrok to bind only to localhost (security)
+      lineinfile:
+        path: /etc/tomcat9/server.xml
+        regexp: '^\s*<Connector port="8080"'
+        line: '    <Connector port="8080" protocol="HTTP/1.1" address="127.0.0.1"'
+        backup: yes
+      notify: restart tomcat
+
+    - name: Ensure Tomcat is running
+      service:
+        name: tomcat9
+        state: started
+        enabled: yes
+
+    - name: Ensure Apache is running
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+    - name: Create SSL certificate (self-signed for testing)
+      command: >
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048
+        -keyout {{ apache_ssl_key }}
+        -out {{ apache_ssl_cert }}
+        -subj "/C=US/ST=State/L=City/O=Organization/CN={{ ansible_fqdn }}"
+      args:
+        creates: "{{ apache_ssl_cert }}"
+      when: create_self_signed_cert | default(false)
+
+    - name: Set proper permissions on SSL files
+      file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ apache_ssl_cert }}", mode: "0644" }
+        - { path: "{{ apache_ssl_key }}", mode: "0600" }
+      when: create_self_signed_cert | default(false)
+
+    - name: Test Apache configuration
+      command: apache2ctl configtest
+      register: apache_config_test
+      changed_when: false
+
+    - name: Display Apache config test result
+      debug:
+        var: apache_config_test.stdout_lines
+
+  handlers:
+    - name: restart apache
+      service:
+        name: apache2
+        state: restarted
+
+    - name: restart tomcat
+      service:
+        name: tomcat9
+        state: restarted
