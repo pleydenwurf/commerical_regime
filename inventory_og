@@ -1,167 +1,312 @@
-# inventory/hosts.yml
-all:
-  children:
-    opengrok_servers:
-      hosts:
-        opengrok-01:
-          ansible_host: 192.168.1.100
-          ansible_user: ansible
-          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+---
+- name: Configure Apache reverse proxy for OpenGrok with Keycloak OpenID authentication
+  hosts: opengrok_servers
+  become: yes
+  vars:
+    # OpenGrok configuration
+    opengrok_port: 8080
+    opengrok_context: "/source"
+    
+    # Keycloak configuration
+    keycloak_url: "https://your-keycloak-server.domain.com"
+    keycloak_realm: "your-realm"
+    keycloak_client_id: "opengrok-client"
+    keycloak_client_secret: "your-client-secret"
+    
+    # Apache configuration
+    apache_server_name: "opengrok.yourdomain.com"
+    apache_ssl_cert: "/etc/ssl/certs/opengrok.crt"
+    apache_ssl_key: "/etc/ssl/private/opengrok.key"
+    
+    # OpenID Connect configuration
+    oidc_crypto_passphrase: "your-crypto-passphrase"
+    oidc_session_max_duration: 3600
+
+  tasks:
+    - name: Install required packages
+      package:
+        name:
+          - httpd
+          - mod_ssl
+          - mod_auth_openidc
+        state: present
+
+    - name: Enable Apache modules
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - ssl
+        - rewrite
+        - proxy
+        - proxy_http
+        - auth_openidc
+      notify: restart apache
+      when: ansible_os_family == "Debian"
+
+    - name: Create Apache configuration directory
+      file:
+        path: /etc/httpd/conf.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure OpenGrok virtual host with OpenID Connect
+      template:
+        src: opengrok-vhost.conf.j2
+        dest: /etc/httpd/conf.d/opengrok.conf
+        backup: yes
+      notify: restart apache
+
+    - name: Create SSL certificate directory
+      file:
+        path: /etc/ssl/certs
+        state: directory
+        mode: '0755'
+
+    - name: Create SSL private key directory
+      file:
+        path: /etc/ssl/private
+        state: directory
+        mode: '0700'
+
+    - name: Generate self-signed SSL certificate (if not using existing certs)
+      command: >
+        openssl req -new -nodes -x509 -subj "/C=US/ST=State/L=City/O=Organization/CN={{ apache_server_name }}"
+        -days 365 -keyout {{ apache_ssl_key }} -out {{ apache_ssl_cert }}
+      args:
+        creates: "{{ apache_ssl_cert }}"
+      when: generate_self_signed_cert | default(false)
+
+    - name: Set proper permissions on SSL files
+      file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: '0600'
+      loop:
+        - "{{ apache_ssl_cert }}"
+        - "{{ apache_ssl_key }}"
+      when: generate_self_signed_cert | default(false)
+
+    - name: Configure firewall for HTTP and HTTPS
+      firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - http
+        - https
+      when: ansible_os_family == "RedHat"
+
+    - name: Start and enable Apache
+      service:
+        name: httpd
+        state: started
+        enabled: yes
+
+    - name: Configure SELinux for Apache proxy (RHEL/CentOS)
+      seboolean:
+        name: httpd_can_network_connect
+        state: yes
+        persistent: yes
+      when: ansible_os_family == "RedHat" and ansible_selinux.status == "enabled"
+
+  handlers:
+    - name: restart apache
+      service:
+        name: httpd
+        state: restarted
 
 ---
-# group_vars/opengrok_servers/main.yml
-# OpenGrok Configuration Variables
+# Template file: templates/opengrok-vhost.conf.j2
+<VirtualHost *:80>
+    ServerName {{ apache_server_name }}
+    Redirect permanent / https://{{ apache_server_name }}/
+</VirtualHost>
 
-# Versions
-opengrok_version: "1.13.6"
-ctags_version: "6.0.0"
-tomcat_version: "10.1.15"
-
-# Users and Groups
-opengrok_user: "opengrok"
-opengrok_group: "opengrok"
-
-# Directories
-opengrok_home: "/opt/opengrok"
-opengrok_data: "/var/opengrok"
-opengrok_src: "/var/opengrok/src"
-opengrok_etc: "/var/opengrok/etc"
-opengrok_log: "/var/log/opengrok"
-tomcat_home: "/opt/tomcat"
-
-# Java Configuration
-java_home: "/usr/lib/jvm/java-11-openjdk"
-
-# Optional: Create sample repository
-create_sample_repo: false
-
-# Memory settings for Java processes
-java_xms: "512M"
-java_xmx: "2048M"
-
-# Indexing schedule (systemd timer format)
-indexer_schedule: "6h"  # Every 6 hours
-
-# Network settings
-opengrok_port: 8080
-tomcat_shutdown_port: 8005
-
-# Additional Python packages (optional)
-additional_python_packages:
-  - GitPython
-  - paramiko
-  - schedule
-  - click
-
----
-# host_vars/opengrok-01/main.yml
-# Host-specific variables for opengrok-01
-
-# Specific repositories to clone (optional)
-repositories_to_clone:
-  - name: "sample-project"
-    url: "https://github.com/your-org/sample-project.git"
-    branch: "main"
-  - name: "documentation"
-    url: "https://github.com/your-org/documentation.git"
-    branch: "master"
-
-# Host-specific resource allocation
-java_xms: "1024M"
-java_xmx: "4096M"
-
-# Custom indexing exclusions
-indexer_excludes:
-  - "*.log"
-  - "*.tmp"
-  - "node_modules/*"
-  - ".git/*"
-  - "target/*"
-  - "build/*"
-
----
-# Additional tasks for repository management
-# Add these tasks to the main playbook if you want automatic repository cloning
-
-- name: Clone additional repositories
-  git:
-    repo: "{{ item.url }}"
-    dest: "{{ opengrok_src }}/{{ item.name }}"
-    version: "{{ item.branch | default('main') }}"
-    depth: 1
-  loop: "{{ repositories_to_clone | default([]) }}"
-  become_user: "{{ opengrok_user }}"
-  when: repositories_to_clone is defined
-
-- name: Install additional Python packages
-  pip:
-    name: "{{ additional_python_packages }}"
-    executable: pip3
-    state: present
-  when: additional_python_packages is defined
-
-- name: Create repository sync cron job
-  cron:
-    name: "OpenGrok repository sync"
-    minute: "0"
-    hour: "*/3"
-    job: "{{ opengrok_home }}/bin/opengrok-sync.py --full"
-    user: "{{ opengrok_user }}"
-  when: setup_cron_sync | default(false)
+<VirtualHost *:443>
+    ServerName {{ apache_server_name }}
+    
+    # SSL Configuration
+    SSLEngine on
+    SSLCertificateFile {{ apache_ssl_cert }}
+    SSLCertificateKeyFile {{ apache_ssl_key }}
+    SSLProtocol all -SSLv2 -SSLv3
+    SSLCipherSuite ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305
+    SSLHonorCipherOrder on
+    
+    # OpenID Connect Configuration
+    OIDCProviderMetadataURL {{ keycloak_url }}/realms/{{ keycloak_realm }}/.well-known/openid_configuration
+    OIDCClientID {{ keycloak_client_id }}
+    OIDCClientSecret {{ keycloak_client_secret }}
+    OIDCCryptoPassphrase {{ oidc_crypto_passphrase }}
+    OIDCRedirectURI https://{{ apache_server_name }}/oidc_redirect
+    OIDCScope "openid email profile"
+    OIDCSessionMaxDuration {{ oidc_session_max_duration }}
+    
+    # Session configuration
+    OIDCSessionType server-cache
+    OIDCCacheType shm
+    OIDCCacheShmMax 500
+    
+    # Cookie settings
+    OIDCCookiePath /
+    OIDCCookieHTTPOnly On
+    OIDCCookieSecure On
+    OIDCCookieSameSite On
+    
+    # Authentication for OpenGrok
+    <Location "{{ opengrok_context }}">
+        AuthType openid-connect
+        Require valid-user
+        
+        # Optional: Require specific roles or groups
+        # Require claim roles:admin
+        # Require claim groups:opengrok-users
+    </Location>
+    
+    # Allow public access to static resources
+    <Location "{{ opengrok_context }}/static">
+        Require all granted
+    </Location>
+    
+    <Location "{{ opengrok_context }}/css">
+        Require all granted
+    </Location>
+    
+    <Location "{{ opengrok_context }}/js">
+        Require all granted
+    </Location>
+    
+    # Reverse proxy configuration
+    ProxyPreserveHost On
+    ProxyRequests Off
+    
+    # Pass authentication headers to OpenGrok
+    ProxyPassMatch ^{{ opengrok_context }}/(.*)$ http://localhost:{{ opengrok_port }}{{ opengrok_context }}/$1
+    ProxyPassReverse {{ opengrok_context }}/ http://localhost:{{ opengrok_port }}{{ opengrok_context }}/
+    
+    # Set headers for user information
+    ProxyPassReverse / http://localhost:{{ opengrok_port }}/
+    
+    # Pass user information to OpenGrok
+    <Location "{{ opengrok_context }}">
+        # Pass OIDC claims as headers
+        RequestHeader set X-Remote-User "%{OIDC_CLAIM_preferred_username}e"
+        RequestHeader set X-Remote-User-Email "%{OIDC_CLAIM_email}e"
+        RequestHeader set X-Remote-User-Name "%{OIDC_CLAIM_name}e"
+        RequestHeader set X-Remote-User-Groups "%{OIDC_CLAIM_groups}e"
+    </Location>
+    
+    # Logging
+    ErrorLog logs/opengrok_error.log
+    CustomLog logs/opengrok_access.log combined
+    LogLevel info ssl:warn auth_openidc:info
+</VirtualHost>
 
 ---
-# Example usage commands:
-
-# 1. Run the playbook:
-# ansible-playbook -i inventory/hosts.yml opengrok-install.yml
-
-# 2. Run with specific tags:
-# ansible-playbook -i inventory/hosts.yml opengrok-install.yml --tags "install,configure"
-
-# 3. Run with extra variables:
-# ansible-playbook -i inventory/hosts.yml opengrok-install.yml -e "create_sample_repo=true"
-
-# 4. Check the installation:
-# ansible opengrok_servers -i inventory/hosts.yml -m shell -a "systemctl status tomcat-opengrok"
-
----
-# Verification tasks (add to main playbook)
-- name: Verify OpenGrok installation
-  block:
-    - name: Check if OpenGrok is running
+# Keycloak client configuration tasks
+- name: Configure Keycloak client for OpenGrok
+  hosts: localhost
+  vars:
+    keycloak_admin_url: "{{ keycloak_url }}/admin"
+    keycloak_admin_user: "admin"
+    keycloak_admin_password: "your-admin-password"
+    
+  tasks:
+    - name: Check if Keycloak client exists
       uri:
-        url: "http://localhost:8080/source"
+        url: "{{ keycloak_admin_url }}/realms/{{ keycloak_realm }}/clients"
         method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_access_token }}"
         status_code: 200
-        timeout: 30
-      register: opengrok_check
-      retries: 5
-      delay: 10
-
-    - name: Check OpenGrok API
+      register: existing_clients
+      
+    - name: Create Keycloak client for OpenGrok
       uri:
-        url: "http://localhost:8080/source/api/v1/system/status"
-        method: GET
-        status_code: 200
-        timeout: 10
-      register: api_check
+        url: "{{ keycloak_admin_url }}/realms/{{ keycloak_realm }}/clients"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_access_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          clientId: "{{ keycloak_client_id }}"
+          name: "OpenGrok Client"
+          description: "OpenGrok source code browser"
+          enabled: true
+          clientAuthenticatorType: "client-secret"
+          secret: "{{ keycloak_client_secret }}"
+          redirectUris:
+            - "https://{{ apache_server_name }}/oidc_redirect"
+          webOrigins:
+            - "https://{{ apache_server_name }}"
+          protocol: "openid-connect"
+          publicClient: false
+          bearerOnly: false
+          consentRequired: false
+          standardFlowEnabled: true
+          implicitFlowEnabled: false
+          directAccessGrantsEnabled: true
+          serviceAccountsEnabled: false
+          frontchannelLogout: true
+          attributes:
+            "saml.assertion.signature": "false"
+            "saml.force.post.binding": "false"
+            "saml.multivalued.roles": "false"
+            "saml.encrypt": "false"
+            "saml.server.signature": "false"
+            "saml.server.signature.keyinfo.ext": "false"
+            "exclude.session.state.from.auth.response": "false"
+            "saml_force_name_id_format": "false"
+            "saml.client.signature": "false"
+            "tls.client.certificate.bound.access.tokens": "false"
+            "saml.authnstatement": "false"
+            "display.on.consent.screen": "false"
+            "saml.onetimeuse.condition": "false"
+          protocolMappers:
+            - name: "username"
+              protocol: "openid-connect"
+              protocolMapper: "oidc-usermodel-property-mapper"
+              consentRequired: false
+              config:
+                userinfo.token.claim: "true"
+                user.attribute: "username"
+                id.token.claim: "true"
+                access.token.claim: "true"
+                claim.name: "preferred_username"
+                jsonType.label: "String"
+            - name: "email"
+              protocol: "openid-connect"
+              protocolMapper: "oidc-usermodel-property-mapper"
+              consentRequired: false
+              config:
+                userinfo.token.claim: "true"
+                user.attribute: "email"
+                id.token.claim: "true"
+                access.token.claim: "true"
+                claim.name: "email"
+                jsonType.label: "String"
+            - name: "groups"
+              protocol: "openid-connect"
+              protocolMapper: "oidc-group-membership-mapper"
+              consentRequired: false
+              config:
+                full.path: "false"
+                id.token.claim: "true"
+                access.token.claim: "true"
+                claim.name: "groups"
+                userinfo.token.claim: "true"
+        status_code: 201
+      when: keycloak_client_id not in (existing_clients.json | map(attribute='clientId') | list)
 
-    - name: Verify ctags installation
-      command: ctags --version
-      register: ctags_check
-      changed_when: false
+---
+# Inventory file example: inventory/hosts
+[opengrok_servers]
+opengrok-vm ansible_host=192.168.1.100 ansible_user=your-user
 
-    - name: Check Python tools
-      command: python3 -c "import requests, yaml, flask; print('Python tools OK')"
-      register: python_check
-      changed_when: false
-
-    - name: Display verification results
-      debug:
-        msg:
-          - "OpenGrok web interface: {{ 'OK' if opengrok_check.status == 200 else 'FAILED' }}"
-          - "OpenGrok API: {{ 'OK' if api_check.status == 200 else 'FAILED' }}"
-          - "Ctags: {{ 'OK' if ctags_check.rc == 0 else 'FAILED' }}"
-          - "Python tools: {{ 'OK' if python_check.rc == 0 else 'FAILED' }}"
-
-  tags: verify
+[opengrok_servers:vars]
+ansible_become=yes
+ansible_become_method=sudo
