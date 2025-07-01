@@ -1,0 +1,60 @@
+# Bitbucket repository cloning role
+- name: Clone Bitbucket repositories and create symlinks for OpenGrok
+  hosts: opengrok_servers
+  become: yes
+  vars:
+    # Bitbucket configuration
+    bitbucket_url: "https://your-bitbucket-server.domain.com"
+    bitbucket_token: "your-bitbucket-access-token"
+    bitbucket_projects: []  # Leave empty to clone all projects, or specify: ["PROJECT1", "PROJECT2"]
+    
+    # Directory configuration
+    opengrok_src_dir: "/opt/opengrok/src"
+    git_repos_base_dir: "/opt/git-repos"
+    git_user: "git"
+    git_group: "git"
+    
+    # Clone configuration
+    clone_timeout: 300
+    max_concurrent_clones: 5
+
+  tasks:
+    - name: Install required packages for git operations
+      package:
+        name:
+          - git
+          - python3-requests
+          - curl
+          - jq
+        state: present
+
+    - name: Create git user for repository management
+      user:
+        name: "{{ git_user }}"
+        group: "{{ git_group }}"
+        home: "{{ git_repos_base_dir }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+
+    - name: Create base directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ git_user }}"
+        group: "{{ git_group }}"
+        mode: '0755'
+      loop:
+        - "{{ git_repos_base_dir }}"
+        - "{{ opengrok_src_dir }}"
+
+    - name: Get list of all Bitbucket projects
+      uri:
+        url: "{{ bitbucket_url }}/rest/api/1.0/projects"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ bitbucket_token }}"
+        return_content: yes
+        status_code: 200
+      register: bitbucket_projects_response
+      when: bitbucket_projects | length == 0
