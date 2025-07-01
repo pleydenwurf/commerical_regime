@@ -1,0 +1,875 @@
+---
+# roles/bitbucket-sync/tasks/main.yml
+- name: Install required packages for Bitbucket repository management
+  package:
+    name:
+      - git
+      - python3
+      - python3-pip
+      - python3-requests
+      - curl
+      - jq
+      - cronie
+    state: present
+
+- name: Create git user for repository management
+  user:
+    name: "{{ git_user }}"
+    group: "{{ git_group }}"
+    home: "{{ git_repos_base_dir }}"
+    shell: /bin/bash
+    system: yes
+    create_home: yes
+    comment: "Git Repository Management User"
+
+- name: Create required directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ git_user }}"
+    group: "{{ git_group }}"
+    mode: '0755'
+  loop:
+    - "{{ git_repos_base_dir }}"
+    - "{{ opengrok_src_dir }}"
+    - "{{ git_repos_base_dir }}/logs"
+    - "{{ git_repos_base_dir }}/scripts"
+
+- name: Install Python requests module (if not available via package)
+  pip:
+    name: requests
+    state: present
+  become_user: "{{ git_user }}"
+
+- name: Create Bitbucket repository manager script
+  template:
+    src: bitbucket-repo-manager.py.j2
+    dest: "{{ git_repos_base_dir }}/scripts/bitbucket-repo-manager.py"
+    owner: "{{ git_user }}"
+    group: "{{ git_group }}"
+    mode: '0755'
+  notify: run initial sync
+
+- name: Create git configuration for repository user
+  git_config:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    scope: global
+  become_user: "{{ git_user }}"
+  loop:
+    - { name: "user.name", value: "{{ git_user_name }}" }
+    - { name: "user.email", value: "{{ git_user_email }}" }
+    - { name: "init.defaultBranch", value: "main" }
+    - { name: "pull.rebase", value: "false" }
+
+- name: Create repository update service script
+  template:
+    src: update-repos.sh.j2
+    dest: "{{ git_repos_base_dir }}/scripts/update-repos.sh"
+    owner: "{{ git_user }}"
+    group: "{{ git_group }}"
+    mode: '0755'
+
+- name: Create OpenGrok reindex script
+  template:
+    src: reindex-opengrok.sh.j2
+    dest: "{{ git_repos_base_dir }}/scripts/reindex-opengrok.sh"
+    owner: "{{ git_user }}"
+    group: "{{ git_group }}"
+    mode: '0755'
+  when: enable_opengrok_integration | default(true)
+
+- name: Create systemd service for repository sync
+  template:
+    src: bitbucket-sync.service.j2
+    dest: /etc/systemd/system/bitbucket-sync.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - enable bitbucket sync service
+
+- name: Create systemd timer for repository sync
+  template:
+    src: bitbucket-sync.timer.j2
+    dest: /etc/systemd/system/bitbucket-sync.timer
+    mode: '0644'
+  notify:
+    - reload systemd
+    - enable bitbucket sync timer
+
+- name: Create OpenGrok reindex systemd service
+  template:
+    src: opengrok-reindex.service.j2
+    dest: /etc/systemd/system/opengrok-reindex.service
+    mode: '0644'
+  when: enable_opengrok_integration | default(true)
+  notify: reload systemd
+
+- name: Create OpenGrok reindex systemd timer
+  template:
+    src: opengrok-reindex.timer.j2
+    dest: /etc/systemd/system/opengrok-reindex.timer
+    mode: '0644'
+  when: enable_opengrok_integration | default(true)
+  notify:
+    - reload systemd
+    - enable opengrok reindex timer
+
+- name: Create logrotate configuration for repository sync logs
+  template:
+    src: bitbucket-sync.logrotate.j2
+    dest: /etc/logrotate.d/bitbucket-sync
+    mode: '0644'
+
+- name: Configure firewall for git operations (if needed)
+  firewalld:
+    port: "{{ item }}"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop:
+    - "443/tcp"
+    - "22/tcp"
+  when: configure_firewall | default(false)
+
+- name: Set SELinux context for git repositories
+  sefcontext:
+    target: "{{ git_repos_base_dir }}(/.*)?"
+    setype: user_home_t
+    state: present
+  when: ansible_selinux.status == "enabled"
+  notify: restore selinux context
+
+- name: Apply SELinux context
+  command: restorecon -R {{ git_repos_base_dir }}
+  when: ansible_selinux.status == "enabled"
+
+---
+# roles/bitbucket-sync/handlers/main.yml
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: enable bitbucket sync service
+  systemd:
+    name: bitbucket-sync.service
+    enabled: yes
+
+- name: enable bitbucket sync timer
+  systemd:
+    name: bitbucket-sync.timer
+    enabled: yes
+    state: started
+
+- name: enable opengrok reindex timer
+  systemd:
+    name: opengrok-reindex.timer
+    enabled: yes
+    state: started
+
+- name: restore selinux context
+  command: restorecon -R {{ git_repos_base_dir }}
+
+- name: run initial sync
+  command: "{{ git_repos_base_dir }}/scripts/bitbucket-repo-manager.py"
+  become_user: "{{ git_user }}"
+  async: 3600
+  poll: 0
+
+---
+# roles/bitbucket-sync/defaults/main.yml
+# Bitbucket configuration
+bitbucket_url: "https://bitbucket.example.com"
+bitbucket_token: ""
+bitbucket_projects: []  # Empty for all projects, or specify ["PROJ1", "PROJ2"]
+
+# Directory configuration
+git_repos_base_dir: "/opt/git-repos"
+opengrok_src_dir: "/opt/opengrok/src"
+
+# User configuration
+git_user: "git"
+git_group: "git"
+git_user_name: "Git Repository Sync"
+git_user_email: "git@{{ ansible_fqdn }}"
+
+# Sync configuration
+max_concurrent_clones: 5
+clone_timeout: 300
+sync_interval: "every 6 hours"
+opengrok_reindex_interval: "daily at 2:00 AM"
+
+# Feature flags
+enable_opengrok_integration: true
+configure_firewall: false
+force_reclone: false
+
+---
+# roles/bitbucket-sync/templates/bitbucket-repo-manager.py.j2
+#!/usr/bin/env python3
+"""
+Bitbucket Repository Manager for Rocky Linux
+Clones all repositories from Bitbucket and creates symlinks for OpenGrok
+"""
+
+import os
+import sys
+import json
+import subprocess
+import logging
+import requests
+import time
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
+
+# Configuration
+BITBUCKET_URL = "{{ bitbucket_url }}"
+BITBUCKET_TOKEN = "{{ bitbucket_token }}"
+PROJECTS_FILTER = {{ bitbucket_projects | to_json }}
+GIT_REPOS_DIR = Path("{{ git_repos_base_dir }}")
+OPENGROK_SRC_DIR = Path("{{ opengrok_src_dir }}")
+MAX_WORKERS = {{ max_concurrent_clones }}
+CLONE_TIMEOUT = {{ clone_timeout }}
+LOG_DIR = GIT_REPOS_DIR / "logs"
+
+# Setup logging
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_DIR / 'bitbucket-sync.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class BitbucketManager:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'Authorization': f'Bearer {BITBUCKET_TOKEN}',
+            'Content-Type': 'application/json'
+        })
+        self.base_api_url = f"{BITBUCKET_URL}/rest/api/1.0"
+        
+    def test_connection(self):
+        """Test connection to Bitbucket"""
+        try:
+            response = self.session.get(f"{self.base_api_url}/projects", params={'limit': 1})
+            response.raise_for_status()
+            logger.info("Successfully connected to Bitbucket")
+            return True
+        except requests.RequestException as e:
+            logger.error(f"Failed to connect to Bitbucket: {e}")
+            return False
+        
+    def get_projects(self):
+        """Get list of projects from Bitbucket"""
+        if PROJECTS_FILTER:
+            logger.info(f"Using filtered projects: {PROJECTS_FILTER}")
+            return PROJECTS_FILTER
+            
+        projects = []
+        start = 0
+        limit = 100
+        
+        while True:
+            try:
+                response = self.session.get(
+                    f"{self.base_api_url}/projects",
+                    params={'start': start, 'limit': limit}
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                projects.extend([project['key'] for project in data['values']])
+                
+                if data['isLastPage']:
+                    break
+                start = data['nextPageStart']
+                
+            except requests.RequestException as e:
+                logger.error(f"Failed to get projects: {e}")
+                return []
+                
+        return projects
+    
+    def get_repositories(self, project_key):
+        """Get all repositories for a project"""
+        repositories = []
+        start = 0
+        limit = 100
+        
+        while True:
+            try:
+                response = self.session.get(
+                    f"{self.base_api_url}/projects/{project_key}/repos",
+                    params={'start': start, 'limit': limit}
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                for repo in data['values']:
+                    # Get the HTTPS clone URL
+                    clone_url = None
+                    for link in repo['links']['clone']:
+                        if link['name'] == 'http':
+                            clone_url = link['href']
+                            break
+                    
+                    if clone_url:
+                        repositories.append({
+                            'project_key': project_key,
+                            'slug': repo['slug'],
+                            'name': repo['name'],
+                            'clone_url': clone_url,
+                            'default_branch': repo.get('defaultBranch', 'main')
+                        })
+                
+                if data['isLastPage']:
+                    break
+                start = data['nextPageStart']
+                
+            except requests.RequestException as e:
+                logger.error(f"Failed to get repositories for project {project_key}: {e}")
+                continue
+                
+        return repositories
+    
+    def get_all_repositories(self):
+        """Get all repositories from all projects"""
+        projects = self.get_projects()
+        logger.info(f"Found {len(projects)} projects: {projects}")
+        
+        all_repos = []
+        for project_key in projects:
+            repos = self.get_repositories(project_key)
+            all_repos.extend(repos)
+            logger.info(f"Found {len(repos)} repositories in project {project_key}")
+            
+        return all_repos
+
+def run_command(cmd, cwd=None, timeout=CLONE_TIMEOUT):
+    """Run a shell command with timeout"""
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        return result.returncode == 0, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        logger.error(f"Command timed out: {cmd}")
+        return False, "", "Command timed out"
+    except Exception as e:
+        logger.error(f"Command failed: {cmd}, Error: {e}")
+        return False, "", str(e)
+
+def clone_or_update_repo(repo_info):
+    """Clone or update a single repository"""
+    project_key = repo_info['project_key']
+    slug = repo_info['slug']
+    clone_url = repo_info['clone_url']
+    
+    # Insert token into URL for authentication
+    parsed_url = urlparse(clone_url)
+    auth_url = f"{parsed_url.scheme}://{BITBUCKET_TOKEN}@{parsed_url.netloc}{parsed_url.path}"
+    
+    # Create project directory
+    project_dir = GIT_REPOS_DIR / project_key
+    project_dir.mkdir(parents=True, exist_ok=True)
+    
+    repo_dir = project_dir / slug
+    changed = False
+    
+    try:
+        if repo_dir.exists() and (repo_dir / '.git').exists():
+            # Repository exists, update it
+            logger.info(f"Updating repository: {project_key}/{slug}")
+            
+            # Get current HEAD
+            success, current_head, _ = run_command("git rev-parse HEAD", cwd=repo_dir)
+            if not success:
+                current_head = ""
+            
+            # Fetch all branches and tags
+            success, stdout, stderr = run_command("git fetch --all --prune", cwd=repo_dir)
+            if not success:
+                logger.error(f"Failed to fetch {project_key}/{slug}: {stderr}")
+                return False, f"Failed to fetch {project_key}/{slug}"
+            
+            # Pull latest changes on current branch
+            success, stdout, stderr = run_command("git pull", cwd=repo_dir)
+            if success:
+                # Check if anything changed
+                success, new_head, _ = run_command("git rev-parse HEAD", cwd=repo_dir)
+                if current_head.strip() != new_head.strip():
+                    changed = True
+                    logger.info(f"CHANGED: Updated {project_key}/{slug}")
+                else:
+                    logger.info(f"OK: No changes in {project_key}/{slug}")
+            else:
+                logger.warning(f"Pull failed for {project_key}/{slug}, trying reset: {stderr}")
+                # Try to reset to origin/HEAD if pull fails
+                success, stdout, stderr = run_command("git reset --hard @{u}", cwd=repo_dir)
+                if success:
+                    changed = True
+                    logger.info(f"CHANGED: Reset {project_key}/{slug}")
+                else:
+                    logger.error(f"Failed to update {project_key}/{slug}: {stderr}")
+                    return False, f"Failed to update {project_key}/{slug}"
+                
+        else:
+            # Repository doesn't exist, clone it
+            logger.info(f"Cloning repository: {project_key}/{slug}")
+            
+            # Remove directory if it exists but isn't a git repo
+            if repo_dir.exists():
+                run_command(f"rm -rf {repo_dir}")
+            
+            success, stdout, stderr = run_command(
+                f"git clone {auth_url} {repo_dir}",
+                cwd=project_dir.parent
+            )
+            
+            if success:
+                changed = True
+                logger.info(f"CHANGED: Cloned {project_key}/{slug}")
+            else:
+                logger.error(f"Failed to clone {project_key}/{slug}: {stderr}")
+                return False, f"Failed to clone {project_key}/{slug}"
+        
+        return True, f"{'CHANGED' if changed else 'OK'}: {project_key}/{slug}"
+        
+    except Exception as e:
+        logger.error(f"Exception processing {project_key}/{slug}: {e}")
+        return False, f"Exception processing {project_key}/{slug}: {e}"
+
+def create_symlinks(repositories):
+    """Create symlinks in OpenGrok src directory"""
+    if not OPENGROK_SRC_DIR.exists():
+        logger.info(f"Creating OpenGrok src directory: {OPENGROK_SRC_DIR}")
+        OPENGROK_SRC_DIR.mkdir(parents=True, exist_ok=True)
+    
+    logger.info("Creating symlinks for OpenGrok")
+    created_links = 0
+    
+    for repo_info in repositories:
+        project_key = repo_info['project_key']
+        slug = repo_info['slug']
+        
+        # Create project directory in OpenGrok src
+        opengrok_project_dir = OPENGROK_SRC_DIR / project_key
+        opengrok_project_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create symlink
+        source_path = GIT_REPOS_DIR / project_key / slug
+        symlink_path = opengrok_project_dir / slug
+        
+        if source_path.exists() and (source_path / '.git').exists():
+            # Remove existing symlink if it exists
+            if symlink_path.is_symlink():
+                symlink_path.unlink()
+            elif symlink_path.exists():
+                logger.warning(f"Removing non-symlink at {symlink_path}")
+                if symlink_path.is_dir():
+                    run_command(f"rm -rf {symlink_path}")
+                else:
+                    symlink_path.unlink()
+            
+            try:
+                symlink_path.symlink_to(source_path)
+                logger.debug(f"Created symlink: {symlink_path} -> {source_path}")
+                created_links += 1
+            except OSError as e:
+                logger.error(f"Failed to create symlink for {project_key}/{slug}: {e}")
+        else:
+            logger.warning(f"Source repository not found or invalid: {source_path}")
+    
+    logger.info(f"Created {created_links} symlinks in OpenGrok src directory")
+
+def cleanup_old_symlinks(current_repositories):
+    """Remove symlinks for repositories that no longer exist"""
+    if not OPENGROK_SRC_DIR.exists():
+        return
+    
+    current_repo_paths = set()
+    for repo in current_repositories:
+        repo_path = f"{repo['project_key']}/{repo['slug']}"
+        current_repo_paths.add(repo_path)
+    
+    removed_count = 0
+    for project_dir in OPENGROK_SRC_DIR.iterdir():
+        if project_dir.is_dir():
+            for repo_link in project_dir.iterdir():
+                if repo_link.is_symlink():
+                    repo_path = f"{project_dir.name}/{repo_link.name}"
+                    if repo_path not in current_repo_paths:
+                        logger.info(f"Removing old symlink: {repo_link}")
+                        repo_link.unlink()
+                        removed_count += 1
+    
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} old symlinks")
+
+def main():
+    """Main function"""
+    start_time = time.time()
+    logger.info("=== Starting Bitbucket repository sync ===")
+    
+    # Create base directories
+    GIT_REPOS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize Bitbucket manager
+    bb_manager = BitbucketManager()
+    
+    # Test connection
+    if not bb_manager.test_connection():
+        logger.error("Cannot connect to Bitbucket. Exiting.")
+        sys.exit(1)
+    
+    # Get all repositories
+    try:
+        repositories = bb_manager.get_all_repositories()
+        logger.info(f"Found {len(repositories)} total repositories")
+    except Exception as e:
+        logger.error(f"Failed to get repository list: {e}")
+        sys.exit(1)
+    
+    if not repositories:
+        logger.warning("No repositories found")
+        return
+    
+    # Clone/update repositories in parallel
+    results = []
+    logger.info(f"Processing repositories with {MAX_WORKERS} workers")
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_repo = {
+            executor.submit(clone_or_update_repo, repo): repo 
+            for repo in repositories
+        }
+        
+        for future in as_completed(future_to_repo):
+            repo = future_to_repo[future]
+            try:
+                success, message = future.result()
+                results.append((success, message))
+                if "CHANGED:" in message:
+                    print(f"CHANGED: {repo['project_key']}/{repo['slug']}")
+                elif success:
+                    print(f"OK: {repo['project_key']}/{repo['slug']}")
+                else:
+                    logger.error(message)
+            except Exception as e:
+                error_msg = f"Exception processing {repo['project_key']}/{repo['slug']}: {e}"
+                logger.error(error_msg)
+                results.append((False, error_msg))
+    
+    # Create symlinks for OpenGrok
+{% if enable_opengrok_integration %}
+    create_symlinks(repositories)
+    cleanup_old_symlinks(repositories)
+{% endif %}
+    
+    # Summary
+    successful = sum(1 for success, _ in results if success)
+    changed = sum(1 for success, message in results if success and "CHANGED:" in message)
+    total = len(results)
+    duration = time.time() - start_time
+    
+    logger.info(f"=== Sync completed in {duration:.2f} seconds ===")
+    logger.info(f"Results: {successful}/{total} repositories processed successfully")
+    logger.info(f"Changes: {changed} repositories updated")
+    
+    if successful < total:
+        logger.error("Some repositories failed to sync")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+---
+# roles/bitbucket-sync/templates/update-repos.sh.j2
+#!/bin/bash
+#
+# Bitbucket Repository Update Service Script
+# Wrapper script for systemd service execution
+#
+
+SCRIPT_DIR="{{ git_repos_base_dir }}/scripts"
+PYTHON_SCRIPT="$SCRIPT_DIR/bitbucket-repo-manager.py"
+LOG_DIR="{{ git_repos_base_dir }}/logs"
+LOG_FILE="$LOG_DIR/update-service.log"
+
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
+
+# Function to log with timestamp
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+log_message "Starting Bitbucket repository update service"
+
+# Check if Python script exists
+if [ ! -f "$PYTHON_SCRIPT" ]; then
+    log_message "ERROR: Python script not found at $PYTHON_SCRIPT"
+    exit 1
+fi
+
+# Change to script directory
+cd "$SCRIPT_DIR"
+
+# Run the Python script
+log_message "Executing Python script: $PYTHON_SCRIPT"
+python3 "$PYTHON_SCRIPT"
+exit_code=$?
+
+if [ $exit_code -eq 0 ]; then
+    log_message "Repository update completed successfully"
+else
+    log_message "Repository update failed with exit code $exit_code"
+fi
+
+log_message "Bitbucket repository update service finished"
+exit $exit_code
+
+---
+# roles/bitbucket-sync/templates/reindex-opengrok.sh.j2
+#!/bin/bash
+#
+# OpenGrok Reindexing Script
+# Reindexes OpenGrok after repository updates
+#
+
+OPENGROK_HOME="/opt/opengrok"
+SRC_ROOT="{{ opengrok_src_dir }}"
+DATA_ROOT="/opt/opengrok/data"
+LOG_DIR="{{ git_repos_base_dir }}/logs"
+LOG_FILE="$LOG_DIR/opengrok-reindex.log"
+
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
+
+# Function to log with timestamp
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+log_message "Starting OpenGrok reindexing"
+
+# Check if OpenGrok is installed
+if [ ! -d "$OPENGROK_HOME" ]; then
+    log_message "WARNING: OpenGrok not found at $OPENGROK_HOME"
+    exit 0
+fi
+
+# Check if source directory exists
+if [ ! -d "$SRC_ROOT" ]; then
+    log_message "ERROR: Source directory not found at $SRC_ROOT"
+    exit 1
+fi
+
+# Check for indexer
+INDEXER_JAR="$OPENGROK_HOME/lib/opengrok.jar"
+INDEXER_SCRIPT="$OPENGROK_HOME/bin/opengrok-indexer"
+
+if [ -f "$INDEXER_JAR" ]; then
+    INDEXER_CMD="java -jar $INDEXER_JAR"
+elif [ -f "$INDEXER_SCRIPT" ]; then
+    INDEXER_CMD="$INDEXER_SCRIPT"
+else
+    log_message "ERROR: No OpenGrok indexer found"
+    exit 1
+fi
+
+# Create data directory if it doesn't exist
+mkdir -p "$DATA_ROOT"
+
+log_message "Using indexer: $INDEXER_CMD"
+log_message "Source root: $SRC_ROOT"
+log_message "Data root: $DATA_ROOT"
+
+# Stop OpenGrok service if running
+if systemctl is-active --quiet opengrok; then
+    log_message "Stopping OpenGrok service"
+    systemctl stop opengrok
+    RESTART_SERVICE=true
+else
+    RESTART_SERVICE=false
+fi
+
+# Run indexing
+log_message "Starting reindexing process"
+cd "$OPENGROK_HOME"
+
+if [[ "$INDEXER_CMD" == *"java -jar"* ]]; then
+    # Using JAR file
+    $INDEXER_CMD \
+        -c /usr/bin/ctags \
+        -s "$SRC_ROOT" \
+        -d "$DATA_ROOT" \
+        -H -P -S -G \
+        -W "$DATA_ROOT/configuration.xml" \
+        >> "$LOG_FILE" 2>&1
+else
+    # Using indexer script
+    $INDEXER_CMD \
+        --ctags /usr/bin/ctags \
+        --source "$SRC_ROOT" \
+        --dataRoot "$DATA_ROOT" \
+        --writeConfig "$DATA_ROOT/configuration.xml" \
+        --progress \
+        >> "$LOG_FILE" 2>&1
+fi
+
+index_exit_code=$?
+
+if [ $index_exit_code -eq 0 ]; then
+    log_message "Reindexing completed successfully"
+else
+    log_message "Reindexing failed with exit code $index_exit_code"
+fi
+
+# Start OpenGrok service if it was running
+if [ "$RESTART_SERVICE" = true ]; then
+    log_message "Restarting OpenGrok service"
+    systemctl start opengrok
+fi
+
+log_message "OpenGrok reindexing finished"
+exit $index_exit_code
+
+---
+# roles/bitbucket-sync/templates/bitbucket-sync.service.j2
+[Unit]
+Description=Bitbucket Repository Sync Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{ git_user }}
+Group={{ git_group }}
+WorkingDirectory={{ git_repos_base_dir }}
+ExecStart={{ git_repos_base_dir }}/scripts/update-repos.sh
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=HOME={{ git_repos_base_dir }}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ git_repos_base_dir }} {{ opengrok_src_dir }}
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
+---
+# roles/bitbucket-sync/templates/bitbucket-sync.timer.j2
+[Unit]
+Description=Run Bitbucket Repository Sync {{ sync_interval }}
+Requires=bitbucket-sync.service
+
+[Timer]
+# Run every 6 hours
+OnCalendar=*-*-* 00,06,12,18:00:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+---
+# roles/bitbucket-sync/templates/opengrok-reindex.service.j2
+[Unit]
+Description=OpenGrok Reindex Service
+After=network.target bitbucket-sync.service
+
+[Service]
+Type=oneshot
+User={{ git_user }}
+Group={{ git_group }}
+ExecStart={{ git_repos_base_dir }}/scripts/reindex-opengrok.sh
+TimeoutStartSec=7200
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=HOME={{ git_repos_base_dir }}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
+
+---
+# roles/bitbucket-sync/templates/opengrok-reindex.timer.j2
+[Unit]
+Description=Run OpenGrok Reindex {{ opengrok_reindex_interval }}
+Requires=opengrok-reindex.service
+
+[Timer]
+# Run daily at 2:00 AM
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+---
+# roles/bitbucket-sync/templates/bitbucket-sync.logrotate.j2
+{{ git_repos_base_dir }}/logs/*.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    su {{ git_user }} {{ git_group }}
+    postrotate
+        systemctl reload rsyslog > /dev/null 2>&1 || true
+    endscript
+}
+
+---
+# Example playbook usage: site.yml
+- name: Configure Bitbucket Repository Synchronization
+  hosts: opengrok_servers
+  become: yes
+  
+  vars:
+    # Bitbucket configuration
+    bitbucket_url: "https://your-bitbucket-server.domain.com"
+    bitbucket_token: "your-bitbucket-access-token"
+    bitbucket_projects: []  # Empty for all projects
+    
+    # Optional overrides
+    git_repos_base_dir: "/opt/git-repos"
+    opengrok_src_dir: "/opt/opengrok/src"
+    max_concurrent_clones: 3
+    enable_opengrok_integration: true
+  
+  roles:
+    - bitbucket-sync
+
+---
+# Example inventory: inventory/hosts
+[opengrok_servers]
+opengrok-vm ansible_host=192.168.1.100 ansible_user=admin
+
+[opengrok_servers:vars]
+ansible_become=yes
+ansible_become_method=sudo
