@@ -1,0 +1,127 @@
+
+Possible Causes
+Different SSL/TLS Libraries or Configurations:
+
+Your Bitbucket script might be using a different HTTP client library (like requests in Python) that has stricter SSL verification defaults
+The GitLab script might be using git commands directly, which can have different SSL handling
+Different versions of libraries between the two scripts could have different default behaviors
+Certificate Store Access:
+
+When running as a service, the process might not have access to the same certificate stores or environment variables that your user session has
+The service user might have different SSL certificate paths configured
+Environment Differences:
+
+Different environment variables (like SSL_CERT_FILE, SSL_CERT_DIR, or REQUESTS_CA_BUNDLE) between your user session and the service context
+Different $HOME directories affecting where SSL certificates are looked up
+Solutions to Try
+1. Disable SSL Verification (Quick Fix): If using Python's requests library, add:
+
+python
+import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+# Then use verify=False in your requests
+response = requests.get(url, verify=False)
+2. Add Certificate to Trust Store:
+
+bash
+# Copy your Bitbucket's certificate to the system trust store
+sudo cp /path/to/bitbucket-cert.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+3. Set Environment Variables in Service: In your service configuration, ensure these environment variables are set:
+
+bash
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+4. Use Git's SSL Configuration: If using git commands, you can configure git to skip SSL verification:
+
+bash
+git config --global http.sslVerify false
+5. Check Service User Context: Ensure your service is running with appropriate permissions and environment. You might need to run the service as the same user that can successfully execute the script manually.
+
+The key difference is likely that your GitLab script is either already configured to handle self-signed certificates or uses a different method for SSL verification. Compare the two scripts to see what SSL-related configurations or libraries differ between them.
+
+
+
+
+
+How do I add an ansible task that performs solution #4?
+
+Edit
+Here's how you can add an Ansible task to configure git to skip SSL verification:
+
+Single Task
+yaml
+- name: Configure git to skip SSL verification globally
+  git_config:
+    name: http.sslVerify
+    value: "false"
+    scope: global
+  become: yes
+Multiple Related Tasks (Recommended)
+yaml
+- name: Configure git SSL settings for self-signed certificates
+  git_config:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    scope: global
+  loop:
+    - { name: "http.sslVerify", value: "false" }
+    - { name: "http.sslCAInfo", value: "" }
+  become: yes
+  tags:
+    - git-config
+    - ssl-config
+For Specific User (Alternative)
+If you want to configure this for a specific user rather than globally:
+
+yaml
+- name: Configure git to skip SSL verification for service user
+  git_config:
+    name: http.sslVerify
+    value: "false"
+    scope: global
+  become: yes
+  become_user: "{{ service_user }}"
+  vars:
+    service_user: "your-service-username"
+More Targeted Approach (Repository-Specific)
+If you want to be more specific and only skip SSL verification for your Bitbucket instance:
+
+yaml
+- name: Configure git to skip SSL verification for Bitbucket
+  git_config:
+    name: "http.https://your-bitbucket-server.sslVerify"
+    value: "false"
+    scope: global
+  become: yes
+Complete Playbook Example
+yaml
+---
+- name: Configure git for self-signed certificates
+  hosts: your_opengrok_vm
+  become: yes
+  tasks:
+    - name: Configure git to skip SSL verification globally
+      git_config:
+        name: http.sslVerify
+        value: "false"
+        scope: global
+      tags: git-ssl-config
+
+    - name: Restart your repository cloning service
+      systemd:
+        name: your-repo-service
+        state: restarted
+      tags: service-restart
+The git_config module is the preferred way to handle git configuration in Ansible as it's idempotent and handles the configuration file properly. Make sure to restart your service after applying this configuration so it picks up the new git settings.
+
+
+
+
+
+
+
+
+
